@@ -1,0 +1,79 @@
+# dependencies
+node_modules/
+
+# Next.js build output
+.next/
+out/
+build/
+
+# database (local dev data, not for version control)
+*.db
+
+# uploaded contracts (user files, not source code)
+contracts/
+
+# backups
+backups/
+
+# test/debug output files
+*.traineddata
+out.txt
+out*.json
+cleaned_text.txt
+glm_raw*.txt
+benchmark_contract_parser_results.json
+
+# env and secrets
+.env*
+src/config/model-providers.json
+
+# misc
+.DS_Store
+*.pem
+Thumbs.db
+Desktop.ini
+
+# debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Prisma generated
+src/src/generated/
+
+# IDE
+.vscode/
+.idea/
+
+# batch review cache
+.batch-review-cache/
+
+# test files
+test file/
+
+# temp OCR cache
+**/.temp-ocr/
+
+# dev server log
+**/.dev-server.log
+**/.dev-server.err.log
+
+# lock files
+package-lock.json
+
+# Claude settings (local)
+.claude/
+
+# startup scripts (local machine specific)
+*.vbs
+*.cmd
+
+# assets (large binary files)
+assets/
+
+# temp test/debug files
+src/test_*.mjs
+src/benchmark_*.mjs
+src/compare_*.mjs
+src/.tmp-*

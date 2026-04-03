@@ -1,0 +1,139 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Staff {
+  id               Int               @id @default(autoincrement())
+  name             String
+  phone            String?
+  role             String?
+  createdAt        DateTime          @default(now())
+  workLogStaff     WorkLogStaff[]
+  productionValues ProductionValue[]
+  reportRoles      ReportRole[]
+}
+
+model Contract {
+  id                Int       @id @default(autoincrement())
+  contractNo        String?
+  clientName        String?
+  partyB            String?
+  filePath          String?
+  signedDate        DateTime?
+  notes             String?
+  pricingMode       String    @default("unit")
+  areaPricingAmount Float?
+  areaPricingArea   Float?
+  createdAt         DateTime  @default(now())
+  projects          Project[]
+  priceItems        PriceItem[]
+}
+
+model Project {
+  id          Int          @id @default(autoincrement())
+  name        String
+  status      String       @default("进行中")
+  phase       String?
+  contractId  Int?
+  contract    Contract?    @relation(fields: [contractId], references: [id])
+  createdAt   DateTime     @default(now())
+  workLogs    WorkLog[]
+  testReports TestReport[]
+}
+
+model PriceItem {
+  id           Int      @id @default(autoincrement())
+  contractId   Int
+  contract     Contract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  testItemName String
+  quantity     Float?
+  unit         String?
+  unitPrice    Float
+  createdAt    DateTime @default(now())
+}
+
+model InternalPrice {
+  id           Int      @id @default(autoincrement())
+  testItemName String
+  unit         String?
+  unitPrice    Float
+  createdAt    DateTime @default(now())
+}
+
+model WorkLog {
+  id               Int               @id @default(autoincrement())
+  workDate         DateTime
+  projectId        Int?
+  project          Project?          @relation(fields: [projectId], references: [id])
+  testContent      String
+  quantity         Float
+  unit             String?
+  rawText          String?
+  remarks          String?
+  allocationShare  Float?
+  manualTotalValue Float?
+  manualValueNote  String?
+  createdAt        DateTime          @default(now())
+  staffMembers     WorkLogStaff[]
+  productionValues ProductionValue[]
+}
+
+model WorkLogStaff {
+  id        Int     @id @default(autoincrement())
+  workLogId Int
+  workLog   WorkLog @relation(fields: [workLogId], references: [id], onDelete: Cascade)
+  staffId   Int
+  staff     Staff   @relation(fields: [staffId], references: [id], onDelete: Cascade)
+
+  @@unique([workLogId, staffId])
+}
+
+model ProductionValue {
+  id              Int         @id @default(autoincrement())
+  workLogId       Int?
+  workLog         WorkLog?    @relation(fields: [workLogId], references: [id], onDelete: Cascade)
+  reportId        Int?
+  report          TestReport? @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  staffId         Int
+  staff           Staff       @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  value           Float
+  unitPriceUsed   Float
+  priceSource     String
+  calculationMode String      @default("unit")
+  roleType        String?
+  workloadQuantity Float?
+  workloadShare   Float?
+  createdAt       DateTime    @default(now())
+}
+
+model TestReport {
+  id               Int               @id @default(autoincrement())
+  reportNo         String?
+  projectId        Int?
+  project          Project?          @relation(fields: [projectId], references: [id])
+  testContent      String
+  reportDate       DateTime?
+  quantity         Float             @default(1)
+  unit             String?
+  remarks          String?
+  rawText          String?
+  createdAt        DateTime          @default(now())
+  roles            ReportRole[]
+  productionValues ProductionValue[]
+}
+
+model ReportRole {
+  id       Int        @id @default(autoincrement())
+  reportId Int
+  report   TestReport @relation(fields: [reportId], references: [id], onDelete: Cascade)
+  roleType String
+  staffId  Int
+  staff    Staff      @relation(fields: [staffId], references: [id])
+
+  @@unique([reportId, roleType, staffId])
+}
