@@ -106,6 +106,7 @@ export async function GET(request) {
             工作量合计: item.workloadQuantity,
             未签合同记录: item.noContractCount,
             待确认占比: item.pendingAreaCount,
+            产值超限: item.exceededCount,
         }));
 
         rows.push({
@@ -119,6 +120,7 @@ export async function GET(request) {
             工作量合计: Number(rows.reduce((s, r) => s + Number(r.工作量合计 || 0), 0).toFixed(2)),
             未签合同记录: rows.reduce((s, r) => s + Number(r.未签合同记录 || 0), 0),
             待确认占比: rows.reduce((s, r) => s + Number(r.待确认占比 || 0), 0),
+            产值超限: rows.reduce((s, r) => s + Number(r.产值超限 || 0), 0),
         });
 
         addSheet(workbook, rows, '人员产值汇总');
@@ -135,6 +137,7 @@ export async function GET(request) {
             工作量合计: item.workloadQuantity,
             未签合同记录: item.noContractCount,
             待确认占比: item.pendingAreaCount,
+            产值超限: item.exceededCount,
         }));
         addSheet(workbook, rows, '项目产值汇总');
     } else {

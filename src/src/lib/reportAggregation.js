@@ -58,6 +58,8 @@ function getLogMeta(log) {
     const pricingMode = normalizePricingMode(contract?.pricingMode);
     const share = normalizeAllocationShare(log.allocationShare);
 
+    const isExceeded = (log.productionValues || []).some((item) => item.exceeded);
+
     return {
         quantity,
         totalValue,
@@ -69,6 +71,7 @@ function getLogMeta(log) {
         workloadPerStaff: staffCount > 0 ? quantity / staffCount : 0,
         hasContract: Boolean(contract?.id),
         isAreaPending: Boolean(contract?.id) && pricingMode === 'area' && totalValue <= 0,
+        isExceeded,
     };
 }
 
@@ -91,6 +94,7 @@ export function aggregateReports(logs, groupBy = 'staff') {
                     workloadQuantity: 0,
                     noContractCount: 0,
                     pendingAreaCount: 0,
+                    exceededCount: 0,
                 });
             }
 
@@ -101,6 +105,7 @@ export function aggregateReports(logs, groupBy = 'staff') {
             entry.workloadQuantity += meta.quantity;
             entry.noContractCount += meta.hasContract ? 0 : 1;
             entry.pendingAreaCount += meta.isAreaPending ? 1 : 0;
+            entry.exceededCount += meta.isExceeded ? 1 : 0;
         });
 
         return Array.from(map.values())
@@ -134,6 +139,7 @@ export function aggregateReports(logs, groupBy = 'staff') {
                     workloadQuantity: 0,
                     noContractCount: 0,
                     pendingAreaCount: 0,
+                    exceededCount: 0,
                 });
             }
 
@@ -146,6 +152,7 @@ export function aggregateReports(logs, groupBy = 'staff') {
             entry.workloadQuantity += meta.workloadPerStaff;
             entry.noContractCount += meta.hasContract ? 0 : 1;
             entry.pendingAreaCount += meta.isAreaPending ? 1 : 0;
+            entry.exceededCount += meta.isExceeded ? 1 : 0;
         });
     });
 
@@ -205,6 +212,7 @@ export function aggregateReportsWithType(logs, testReports, groupBy = 'staff') {
                     reportCount: 0,
                     noContractCount: 0,
                     pendingAreaCount: 0,
+                    exceededCount: 0,
                 });
             }
             return map.get(projectId);
@@ -220,6 +228,7 @@ export function aggregateReportsWithType(logs, testReports, groupBy = 'staff') {
             entry.workloadQuantity += meta.quantity;
             entry.noContractCount += meta.hasContract ? 0 : 1;
             entry.pendingAreaCount += meta.isAreaPending ? 1 : 0;
+            entry.exceededCount += meta.isExceeded ? 1 : 0;
         });
 
         testReports.forEach((report) => {
@@ -258,6 +267,7 @@ export function aggregateReportsWithType(logs, testReports, groupBy = 'staff') {
                 reportCount: 0,
                 noContractCount: 0,
                 pendingAreaCount: 0,
+                exceededCount: 0,
             });
         }
         return map.get(staffId);
@@ -281,6 +291,7 @@ export function aggregateReportsWithType(logs, testReports, groupBy = 'staff') {
             entry.workloadQuantity += meta.workloadPerStaff;
             entry.noContractCount += meta.hasContract ? 0 : 1;
             entry.pendingAreaCount += meta.isAreaPending ? 1 : 0;
+            entry.exceededCount += meta.isExceeded ? 1 : 0;
         });
     });
 
@@ -369,10 +380,13 @@ export function buildWorklogDetailRows(logs) {
                 计价方式: meta.pricingMode === 'area' && meta.hasContract ? '面积合同' : (meta.hasContract ? '单价合同' : '未签合同'),
                 占比: meta.share === null ? '' : `${(meta.share * 100).toFixed(2).replace(/\.?0+$/u, '')}%`,
                 产值: Number((production?.value || 0).toFixed(2)),
+                原始产值: production?.exceeded ? Number((production?.originalValue || 0).toFixed(2)) : '',
                 价格来源: production?.priceSource || '',
-                状态: meta.isAreaPending
-                    ? '待确认占比'
-                    : (meta.hasContract ? (meta.totalValue > 0 ? '已计价' : '未匹配单价') : '仅统计工作量'),
+                状态: meta.isExceeded
+                    ? '产值超限'
+                    : meta.isAreaPending
+                        ? '待确认占比'
+                        : (meta.hasContract ? (meta.totalValue > 0 ? '已计价' : '未匹配单价') : '仅统计工作量'),
             });
         });
     });

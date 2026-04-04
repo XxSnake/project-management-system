@@ -25,6 +25,7 @@ function getStaffNames(log) {
 
 function getStatusClass(tone) {
     if (tone === 'approved') return 'status-badge--approved';
+    if (tone === 'danger') return 'status-badge--rejected';
     if (tone === 'warning') return 'status-badge--rejected';
     return 'status-badge--pending';
 }
@@ -394,9 +395,10 @@ export default function WorkLogPage() {
     const filteredTotalValue = filteredLogs.reduce((sum, log) => sum + sumProductionValues(log), 0);
     const filteredWorkload = filteredLogs.reduce((sum, log) => sum + Number(log.quantity || 0), 0);
     const pendingAreaCount = filteredLogs.filter((log) => getWorklogBillingState(log).code === 'pending-area-share').length;
+    const exceededCount = filteredLogs.filter((log) => getWorklogBillingState(log).code === 'exceeded').length;
     const noContractCount = filteredLogs.filter((log) => {
         const state = getWorklogBillingState(log);
-        return state.code === 'workload-only' || state.code === 'no-contract-guide-price';
+        return state.code === 'workload-only' || state.code === 'no-contract-manual';
     }).length;
 
     return (
@@ -434,6 +436,12 @@ export default function WorkLogPage() {
                         <div className="mini-kpi-label">未签合同</div>
                         <div className="mini-kpi-value">{noContractCount}</div>
                     </div>
+                    {exceededCount > 0 && (
+                        <div className="mini-kpi">
+                            <div className="mini-kpi-label">产值超限</div>
+                            <div className="mini-kpi-value" style={{ color: 'var(--color-danger, #ef4444)' }}>{exceededCount}</div>
+                        </div>
+                    )}
                 </div>
 
                 <div className="report-grid">
@@ -689,7 +697,14 @@ export default function WorkLogPage() {
                                                 <td>
                                                     <span className={`status-badge ${getStatusClass(status.tone)}`}>{status.label}</span>
                                                 </td>
-                                                <td className="text-right"><span className="value-text">{formatCurrency(totalValue)}</span></td>
+                                                <td className="text-right">
+                                                    <span className="value-text">{formatCurrency(totalValue)}</span>
+                                                    {status.code === 'exceeded' && log.productionValues?.[0]?.originalValue > 0 && (
+                                                        <div className="feed-item-meta" style={{ color: 'var(--color-danger, #ef4444)' }}>
+                                                            原值 {formatCurrency(log.productionValues.reduce((s, pv) => s + (pv.originalValue || 0), 0))}
+                                                        </div>
+                                                    )}
+                                                </td>
                                                 <td>
                                                     <div className="chip-row">
                                                         {status.code === 'pending-area-share' && (

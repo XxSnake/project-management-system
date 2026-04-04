@@ -238,10 +238,20 @@ export default function ProjectsPage() {
                 }),
             });
 
+            const data = await response.json();
             if (!response.ok) {
-                const data = await response.json();
                 alert(data.error || '关联合同失败');
                 return;
+            }
+
+            // 显示补算结果
+            if (data.retroactiveResult) {
+                const r = data.retroactiveResult;
+                if (r.status === 'completed' && r.calculated > 0) {
+                    alert(`已关联合同并完成产值补算：\n补算 ${r.calculated} 条记录${r.exceeded > 0 ? `，其中 ${r.exceeded} 条超限` : ''}${r.pendingAreaShare > 0 ? `\n还有 ${r.pendingAreaShare} 条面积合同记录需要补填占比` : ''}`);
+                } else if (r.status === 'completed' && r.pendingAreaShare > 0) {
+                    alert(`已关联面积合同，有 ${r.pendingAreaShare} 条历史记录需要在工作记录页面补填占比后才能计算产值。`);
+                }
             }
 
             setLinkingProjectId(null);

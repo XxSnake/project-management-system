@@ -1,4 +1,5 @@
 import prisma from '@/lib/prisma';
+import { retroactiveCalculation } from '@/lib/productionCalculator';
 import { NextResponse } from 'next/server';
 
 export async function GET() {
@@ -32,18 +33,45 @@ export async function PUT(request) {
         return NextResponse.json({ error: '缺少项目 ID' }, { status: 400 });
     }
 
+    const projectId = Number(data.id);
+
+    // 检查是否是新关联合同（之前没有合同，现在有了）
+    const oldProject = await prisma.project.findUnique({
+        where: { id: projectId },
+        select: { contractId: true },
+    });
+
+    const newContractId = data.contractId || null;
+    const isNewContractLink = !oldProject?.contractId && newContractId;
+
+    const updateData = {
+        name: data.name,
+        status: data.status || '进行中',
+        phase: data.phase || null,
+        contractId: newContractId,
+    };
+
+    // 首次关联合同时记录时间
+    if (isNewContractLink) {
+        updateData.contractLinkedAt = new Date();
+    }
+
     const project = await prisma.project.update({
-        where: { id: Number(data.id) },
-        data: {
-            name: data.name,
-            status: data.status || '进行中',
-            phase: data.phase || null,
-            contractId: data.contractId || null,
-        },
+        where: { id: projectId },
+        data: updateData,
         include: { contract: true },
     });
 
-    return NextResponse.json(project);
+    // 首次关联合同 → 自动触发补算
+    let retroResult = null;
+    if (isNewContractLink) {
+        retroResult = await retroactiveCalculation(projectId);
+    }
+
+    return NextResponse.json({
+        ...project,
+        retroactiveResult: retroResult,
+    });
 }
 
 export async function DELETE(request) {

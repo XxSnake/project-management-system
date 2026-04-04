@@ -115,6 +115,7 @@ export default function ReportsPage() {
     const totalWorkload = staffData.reduce((sum, item) => sum + Number(item.workloadQuantity || 0), 0);
     const pendingAreaCount = projectData.reduce((sum, item) => sum + Number(item.pendingAreaCount || 0), 0);
     const noContractCount = projectData.reduce((sum, item) => sum + Number(item.noContractCount || 0), 0);
+    const exceededCount = projectData.reduce((sum, item) => sum + Number(item.exceededCount || 0), 0);
 
     const topStaff = staffData.slice(0, 6).map((item) => ({
         name: item.staffName,
@@ -153,9 +154,12 @@ export default function ReportsPage() {
             </div>
 
             <div className="page-body">
-                {(pendingAreaCount > 0 || noContractCount > 0) && (
+                {(pendingAreaCount > 0 || noContractCount > 0 || exceededCount > 0) && (
                     <div className="alert alert-warning">
-                        本月仍有 {pendingAreaCount} 条面积合同记录待确认占比，{noContractCount} 条记录所属项目尚未绑定合同；这些工作量已纳入统计，但部分产值仍待补全。
+                        {pendingAreaCount > 0 && `本月有 ${pendingAreaCount} 条面积合同记录待确认占比。`}
+                        {noContractCount > 0 && `${noContractCount} 条记录所属项目尚未绑定合同。`}
+                        {exceededCount > 0 && `${exceededCount} 条记录因累计产值超过合同100%已按零计入。`}
+                        {' '}工作量已纳入统计，但部分产值仍待补全。
                     </div>
                 )}
 
@@ -184,6 +188,12 @@ export default function ReportsPage() {
                         <div className="mini-kpi-label">未签合同记录</div>
                         <div className="mini-kpi-value">{noContractCount}</div>
                     </div>
+                    {exceededCount > 0 && (
+                        <div className="mini-kpi">
+                            <div className="mini-kpi-label">产值超限</div>
+                            <div className="mini-kpi-value" style={{ color: 'var(--color-danger, #ef4444)' }}>{exceededCount}</div>
+                        </div>
+                    )}
                 </div>
 
                 <div className="report-grid">

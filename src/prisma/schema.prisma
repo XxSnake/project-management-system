@@ -35,15 +35,16 @@ model Contract {
 }
 
 model Project {
-  id          Int          @id @default(autoincrement())
-  name        String
-  status      String       @default("进行中")
-  phase       String?
-  contractId  Int?
-  contract    Contract?    @relation(fields: [contractId], references: [id])
-  createdAt   DateTime     @default(now())
-  workLogs    WorkLog[]
-  testReports TestReport[]
+  id               Int          @id @default(autoincrement())
+  name             String
+  status           String       @default("进行中")
+  phase            String?
+  contractId       Int?
+  contract         Contract?    @relation(fields: [contractId], references: [id])
+  contractLinkedAt DateTime?
+  createdAt        DateTime     @default(now())
+  workLogs         WorkLog[]
+  testReports      TestReport[]
 }
 
 model PriceItem {
@@ -108,6 +109,8 @@ model ProductionValue {
   roleType        String?
   workloadQuantity Float?
   workloadShare   Float?
+  exceeded        Boolean     @default(false)
+  originalValue   Float?
   createdAt       DateTime    @default(now())
 }
 
