@@ -38,21 +38,29 @@ export async function getContractTotalAmount(contract) {
 export async function getCumulativeProjectValue(projectId, excludeWorkLogId = null) {
     if (!projectId) return 0;
 
-    const where = {
+    // 工作日志产值
+    const worklogWhere = {
         workLog: { projectId },
-        exceeded: false,
     };
-
     if (excludeWorkLogId) {
-        where.workLogId = { not: excludeWorkLogId };
+        worklogWhere.workLogId = { not: excludeWorkLogId };
     }
 
-    const result = await prisma.productionValue.aggregate({
-        where,
+    const worklogSum = await prisma.productionValue.aggregate({
+        where: worklogWhere,
         _sum: { value: true },
     });
 
-    return result._sum.value || 0;
+    // 检测报告产值（通过 report.projectId 关联）
+    const reportSum = await prisma.productionValue.aggregate({
+        where: {
+            report: { projectId },
+            workLogId: null,
+        },
+        _sum: { value: true },
+    });
+
+    return (worklogSum._sum.value || 0) + (reportSum._sum.value || 0);
 }
 
 /**

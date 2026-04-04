@@ -311,11 +311,15 @@ export async function retroactiveCalculation(projectId) {
     const contract = project.contract;
     const pricingMode = normalizePricingMode(contract.pricingMode);
 
-    // 查找该项目所有没有产值记录的工作日志
+    // 查找该项目所有没有产值记录、或仅有手动产值的工作日志
+    // （手动产值可能是未签合同期间的临时输入，关联合同后应重新计算）
     const unpricedLogs = await prisma.workLog.findMany({
         where: {
             projectId,
-            productionValues: { none: {} },
+            OR: [
+                { productionValues: { none: {} } },
+                { productionValues: { every: { calculationMode: 'manual' } } },
+            ],
         },
         include: {
             project: { include: { contract: true } },
@@ -358,6 +362,23 @@ export async function retroactiveCalculation(projectId) {
                 });
                 continue;
             }
+        }
+
+        // 清除旧的产值记录（可能是未签合同期间的手动输入）
+        if (log.productionValues?.length > 0) {
+            await prisma.productionValue.deleteMany({
+                where: { workLogId: log.id },
+            });
+        }
+
+        // 清除手动产值字段，让系统按合同规则重新计算
+        if (log.manualTotalValue) {
+            await prisma.workLog.update({
+                where: { id: log.id },
+                data: { manualTotalValue: null, manualValueNote: null },
+            });
+            log.manualTotalValue = null;
+            log.manualValueNote = null;
         }
 
         // 对该条日志执行产值计算
