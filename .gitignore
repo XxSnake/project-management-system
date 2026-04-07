@@ -10,7 +10,7 @@ build/
 *.db
 
 # uploaded contracts (user files, not source code)
-contracts/
+/contracts/
 
 # backups
 backups/

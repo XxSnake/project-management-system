@@ -1,5 +1,6 @@
 import prisma from '@/lib/prisma';
 import { calculateProductionValue } from '@/lib/productionCalculator';
+import { syncDetectionRecordFromWorkLog } from '@/lib/detectionRecordSync';
 import { normalizeAllocationShare } from '@/lib/worklogBilling';
 
 import { NextResponse } from 'next/server';
@@ -139,6 +140,8 @@ export async function PUT(request, { params }) {
             },
             staffIds,
         );
+
+        await syncDetectionRecordFromWorkLog(worklogId);
 
         const refreshedLog = await prisma.workLog.findUnique({
             where: { id: worklogId },

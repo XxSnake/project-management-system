@@ -14,9 +14,18 @@ export async function GET() {
 export async function POST(request) {
     const data = await request.json();
 
+    if (!data.name || !String(data.name).trim()) {
+        return NextResponse.json({ error: '项目名称不能为空' }, { status: 400 });
+    }
+    const trimmedName = String(data.name).trim();
+    const duplicate = await prisma.project.findFirst({ where: { name: trimmedName } });
+    if (duplicate) {
+        return NextResponse.json({ error: `已存在同名项目：${trimmedName}` }, { status: 409 });
+    }
+
     const project = await prisma.project.create({
         data: {
-            name: data.name,
+            name: trimmedName,
             status: data.status || '进行中',
             phase: data.phase || null,
             contractId: data.contractId || null,

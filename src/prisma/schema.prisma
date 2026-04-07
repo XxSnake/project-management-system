@@ -45,6 +45,32 @@ model Project {
   createdAt        DateTime     @default(now())
   workLogs         WorkLog[]
   testReports      TestReport[]
+  detectionRecords ProjectDetectionRecord[]
+}
+
+model ProjectDetectionRecord {
+  id              Int       @id @default(autoincrement())
+  projectId       Int
+  project         Project   @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  workLogId       Int?      @unique
+  workLog         WorkLog?  @relation(fields: [workLogId], references: [id], onDelete: SetNull)
+  sequence        Int
+  testCategory    String?
+  testItem        String?
+  quantityText    String?
+  detectDate      DateTime?
+  reportNo        String?
+  reportEditor    String?
+  mainTester      String?
+  reviewer        String?
+  approver        String?
+  remarks         String?
+  srcTestItem     String?
+  srcQuantityText String?
+  srcDetectDate   DateTime?
+  srcMainTester   String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 }
 
 model PriceItem {
@@ -82,6 +108,7 @@ model WorkLog {
   createdAt        DateTime          @default(now())
   staffMembers     WorkLogStaff[]
   productionValues ProductionValue[]
+  detectionRecord  ProjectDetectionRecord?
 }
 
 model WorkLogStaff {

@@ -1,5 +1,6 @@
 import prisma from '@/lib/prisma';
 import { calculateProductionValue } from '@/lib/productionCalculator';
+import { syncDetectionRecordFromWorkLog } from '@/lib/detectionRecordSync';
 import { expandWorklogRows, parseWPSWorkbook, parseWPSText } from '@/lib/wpsParser';
 
 import { NextResponse } from 'next/server';
@@ -74,6 +75,7 @@ async function saveWorklogRow(row) {
     });
 
     const calculation = await calculateProductionValue(workLog, staffIds);
+    await syncDetectionRecordFromWorkLog(workLog.id);
     return { workLog, calculation, project, projectCreated };
 }
 

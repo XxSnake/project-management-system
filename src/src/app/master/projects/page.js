@@ -286,7 +286,15 @@ export default function ProjectsPage() {
                     </button>
                     <button
                         type="button"
-                        className={showForm ? 'btn btn-secondary' : 'btn btn-primary'}
+                        className="btn btn-primary"
+                        onClick={() => router.push('/contracts?manual=1')}
+                        title="跳转到合同页面，可手动填写工程名、合同信息和检测项目清单"
+                    >
+                        手动新建(含合同)
+                    </button>
+                    <button
+                        type="button"
+                        className={showForm ? 'btn btn-secondary' : 'btn btn-secondary'}
                         onClick={() => {
                             if (showForm) {
                                 resetForm();
@@ -296,7 +304,7 @@ export default function ProjectsPage() {
                             }
                         }}
                     >
-                        {showForm ? '收起表单' : '新建项目'}
+                        {showForm ? '收起表单' : '快速新建(仅名称)'}
                     </button>
                 </div>
             </div>
@@ -458,6 +466,7 @@ export default function ProjectsPage() {
                                                 </td>
                                                 <td>
                                                     <div className="page-actions">
+                                                        <button type="button" className="btn btn-secondary" style={{ minHeight: '32px', padding: '0 12px', fontSize: '0.72rem' }} onClick={() => router.push(`/master/projects/${project.id}`)}>详情</button>
                                                         <button type="button" className="btn btn-primary" style={{ minHeight: '32px', padding: '0 12px', fontSize: '0.72rem' }} onClick={() => handleOpenContractUpload(project)}>上传合同</button>
                                                         <button type="button" className="btn btn-secondary" style={{ minHeight: '32px', padding: '0 12px', fontSize: '0.72rem' }} onClick={() => handleEdit(project)}>编辑</button>
                                                         <button type="button" className="btn btn-danger" style={{ minHeight: '32px', padding: '0 12px', fontSize: '0.72rem' }} onClick={() => void handleDelete(project.id)}>删除</button>
