@@ -89,6 +89,7 @@ function ContractsPage() {
                 fileName: data.fileName || '',
                 priceItems: Array.isArray(parsed.priceItems)
                     ? parsed.priceItems.map((p) => ({
+                        testCategory: p.testCategory || '',
                         testItemName: p.testItemName || p.name || '',
                         quantity: p.quantity ?? '',
                         unit: p.unit || '',
@@ -115,7 +116,7 @@ function ContractsPage() {
     const addPriceItem = () => {
         setForm((current) => ({
             ...current,
-            priceItems: [...current.priceItems, { testItemName: '', quantity: '', unit: '', unitPrice: '' }],
+            priceItems: [...current.priceItems, { testCategory: '', testItemName: '', quantity: '', unit: '', unitPrice: '' }],
         }));
     };
 
@@ -149,6 +150,7 @@ function ContractsPage() {
                 priceItems: form.priceItems
                     .filter((p) => p.testItemName)
                     .map((p) => ({
+                        testCategory: p.testCategory || null,
                         testItemName: p.testItemName,
                         quantity: p.quantity === '' ? null : Number(p.quantity),
                         unit: p.unit || null,
@@ -237,12 +239,12 @@ function ContractsPage() {
                         </div>
 
                         {manualMode ? null : (
-                        <div className="form-group">
-                            <label>合同文件（可选）</label>
-                            <input type="file" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png" disabled={uploading} onChange={handleFilePick} />
-                            {uploading ? <div style={{ color: 'var(--color-muted)', fontSize: 12 }}>OCR 解析中…</div> : null}
-                            {form.fileName ? <div style={{ color: 'var(--color-muted)', fontSize: 12 }}>已上传：{form.fileName}</div> : null}
-                        </div>
+                            <div className="form-group">
+                                <label>合同文件（可选）</label>
+                                <input type="file" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png" disabled={uploading} onChange={handleFilePick} />
+                                {uploading ? <div style={{ color: 'var(--color-muted)', fontSize: 12 }}>OCR 解析中…</div> : null}
+                                {form.fileName ? <div style={{ color: 'var(--color-muted)', fontSize: 12 }}>已上传：{form.fileName}</div> : null}
+                            </div>
                         )}
 
                         <div className="form-grid">
@@ -302,22 +304,24 @@ function ContractsPage() {
                                 <table className="data-table">
                                     <thead>
                                         <tr>
+                                            <th style={{ width: 140 }}>检测类别</th>
                                             <th>检测项目</th>
-                                            <th style={{ width: 130 }}>数量</th>
-                                            <th style={{ width: 110 }}>单位</th>
-                                            <th style={{ width: 150 }}>单价</th>
+                                            <th style={{ width: 100 }}>数量</th>
+                                            <th style={{ width: 90 }}>单位</th>
+                                            <th style={{ width: 110 }}>单价</th>
                                             <th style={{ width: 60 }}></th>
                                         </tr>
                                     </thead>
                                     <tbody>
                                         {form.priceItems.length === 0 ? (
-                                            <tr><td colSpan={5} style={{ textAlign: 'center', color: 'var(--color-muted)' }}>暂无项目，点击"添加"</td></tr>
+                                            <tr><td colSpan={6} style={{ textAlign: 'center', color: 'var(--color-muted)' }}>暂无项目，点击"添加"</td></tr>
                                         ) : form.priceItems.map((item, idx) => (
                                             <tr key={idx}>
+                                                <td><input className="form-input" value={item.testCategory || ''} onChange={(e) => updatePriceItem(idx, 'testCategory', e.target.value)} /></td>
                                                 <td><input className="form-input" value={item.testItemName} onChange={(e) => updatePriceItem(idx, 'testItemName', e.target.value)} /></td>
-                                                <td><input className="form-input" type="number" step="0.0001" value={item.quantity} onChange={(e) => updatePriceItem(idx, 'quantity', e.target.value)} style={{ minWidth: 110 }} /></td>
-                                                <td><input className="form-input" value={item.unit} onChange={(e) => updatePriceItem(idx, 'unit', e.target.value)} style={{ minWidth: 90 }} /></td>
-                                                <td><input className="form-input" type="number" step="0.0001" value={item.unitPrice} onChange={(e) => updatePriceItem(idx, 'unitPrice', e.target.value)} style={{ minWidth: 130 }} /></td>
+                                                <td><input className="form-input" type="number" step="0.0001" value={item.quantity} onChange={(e) => updatePriceItem(idx, 'quantity', e.target.value)} style={{ minWidth: 80 }} /></td>
+                                                <td><input className="form-input" value={item.unit} onChange={(e) => updatePriceItem(idx, 'unit', e.target.value)} style={{ minWidth: 70 }} /></td>
+                                                <td><input className="form-input" type="number" step="0.0001" value={item.unitPrice} onChange={(e) => updatePriceItem(idx, 'unitPrice', e.target.value)} style={{ minWidth: 90 }} /></td>
                                                 <td><button type="button" className="btn btn-danger" style={{ minHeight: 24, padding: '0 8px', fontSize: '0.68rem' }} onClick={() => removePriceItem(idx)}>删</button></td>
                                             </tr>
                                         ))}

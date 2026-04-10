@@ -2,6 +2,7 @@ import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { parseContract } from '@/lib/contractParser';
+import { normalizeOcrPriceItems } from '@/lib/testItemRegistry';
 
 // POST - upload contract file and auto-parse with OCR
 export async function POST(request) {
@@ -30,8 +31,18 @@ export async function POST(request) {
         console.log(`[OCR] 开始解析合同: ${originalName}`);
         parsedData = await parseContract(savedPath, originalName);
         console.log(`[OCR] 解析完成, 置信度: ${parsedData.confidence}, 耗时: ${parsedData.timeMs}ms`);
+        console.log(`[OCR] priceItems 数量: ${Array.isArray(parsedData.priceItems) ? parsedData.priceItems.length : 'N/A'}`);
+        if (Array.isArray(parsedData.priceItems) && parsedData.priceItems.length > 0) {
+            console.log(`[OCR] 第一项: ${JSON.stringify(parsedData.priceItems[0])}`);
+        }
 
-        // OCR 识别出的价目表直接传给前端，由用户自行确认编辑
+        // 对 OCR 识别出的价目表项目按标准检测项目列表进行过滤和标准化
+        if (parsedData.success && Array.isArray(parsedData.priceItems)) {
+            const { items, needsConfirmation } = normalizeOcrPriceItems(parsedData.priceItems);
+            console.log(`[OCR] normalize 后 priceItems 数量: ${items.length}, needsConfirmation: ${needsConfirmation}`);
+            parsedData.priceItems = items;
+            parsedData.needsConfirmation = needsConfirmation;
+        }
     } catch (err) {
         console.error('[OCR] 合同解析失败:', err.message);
         parsedData = {

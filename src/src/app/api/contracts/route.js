@@ -74,6 +74,7 @@ export async function POST(request) {
                     create: priceItems
                         .filter((item) => item && item.testItemName)
                         .map((item) => ({
+                            testCategory: item.testCategory || null,
                             testItemName: String(item.testItemName).trim(),
                             quantity: item.quantity != null ? Number(item.quantity) : null,
                             unit: item.unit || null,

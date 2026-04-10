@@ -68,6 +68,7 @@ export default function ProjectDetailPage() {
     const [error, setError] = useState('');
     const [showAddRecord, setShowAddRecord] = useState(false);
     const [newRecord, setNewRecord] = useState({});
+    const [viewingContract, setViewingContract] = useState(null);
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -149,15 +150,15 @@ export default function ProjectDetailPage() {
                     <h2 style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
                         {project.name}
                         {contract ? (
-                            <a
-                                href="/contracts"
-                                onClick={(e) => { e.preventDefault(); router.push('/contracts'); }}
+                            <button
+                                type="button"
+                                onClick={() => setViewingContract(contract)}
                                 className="badge badge-info"
-                                style={{ fontSize: '0.7rem', cursor: 'pointer', textDecoration: 'none', fontWeight: 500 }}
-                                title={`合同：${contract.contractNo} · ${contract.clientName || ''}`}
+                                style={{ fontSize: '0.7rem', cursor: 'pointer', textDecoration: 'none', fontWeight: 500, border: 'none', background: 'none' }}
+                                title="点击查看合同检测项目"
                             >
-                                {contract.contractNo}
-                            </a>
+                                <span className="badge badge-info">{contract.contractNo}</span>
+                            </button>
                         ) : (
                             <a
                                 href={`/contracts?projectId=${projectId}&projectName=${encodeURIComponent(project.name)}`}
@@ -294,6 +295,64 @@ export default function ProjectDetailPage() {
                     </div>
                 </section>
             </div>
+
+            {/* Contract Detail Dialog */}
+            {viewingContract && (
+                <div style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(4px)' }} onClick={() => setViewingContract(null)}>
+                    <div className="card stack" style={{ width: '90%', maxWidth: 700, padding: 24, maxHeight: '80vh', overflow: 'auto' }} onClick={(e) => e.stopPropagation()}>
+                        <div className="panel-eyebrow">Contract Detail</div>
+                        <div className="panel-title" style={{ marginBottom: 4 }}>
+                            {viewingContract.contractNo || `合同 #${viewingContract.id}`}
+                        </div>
+                        <div className="panel-note" style={{ marginBottom: 16 }}>
+                            {[viewingContract.clientName && `委托方：${viewingContract.clientName}`, viewingContract.partyB && `受托方：${viewingContract.partyB}`, viewingContract.signedDate && `签订日期：${new Date(viewingContract.signedDate).toLocaleDateString('zh-CN')}`, viewingContract.pricingMode === 'area' ? `按面积计价 · 总价 ¥${Number(viewingContract.areaPricingAmount || 0).toLocaleString()} · 面积 ${viewingContract.areaPricingArea || '-'}` : '按单价计价'].filter(Boolean).join(' · ')}
+                        </div>
+
+                        {(viewingContract.priceItems || []).length > 0 ? (
+                            <div className="data-table-shell">
+                                <table className="data-table">
+                                    <thead>
+                                        <tr>
+                                            <th style={{ width: 50 }}>序号</th>
+                                            <th style={{ width: 140 }}>检测类别</th>
+                                            <th>检测项目</th>
+                                            <th style={{ width: 100 }}>数量</th>
+                                            <th style={{ width: 90 }}>单位</th>
+                                            <th style={{ width: 110 }}>单价</th>
+                                            <th style={{ width: 130 }}>小计</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {viewingContract.priceItems.map((item, idx) => (
+                                            <tr key={item.id || idx}>
+                                                <td style={{ textAlign: 'center', color: 'var(--color-muted)' }}>{idx + 1}</td>
+                                                <td>{item.testCategory || '-'}</td>
+                                                <td>{item.testItemName}</td>
+                                                <td>{item.quantity ?? '-'}</td>
+                                                <td>{item.unit || '-'}</td>
+                                                <td>¥{Number(item.unitPrice || 0).toFixed(2)}</td>
+                                                <td>¥{((Number(item.quantity) || 0) * (Number(item.unitPrice) || 0)).toFixed(2)}</td>
+                                            </tr>
+                                        ))}
+                                    </tbody>
+                                    <tfoot>
+                                        <tr>
+                                            <td colSpan={6} style={{ textAlign: 'right', fontWeight: 600 }}>合计</td>
+                                            <td style={{ fontWeight: 600 }}>¥{viewingContract.priceItems.reduce((sum, item) => sum + (Number(item.quantity) || 0) * (Number(item.unitPrice) || 0), 0).toLocaleString()}</td>
+                                        </tr>
+                                    </tfoot>
+                                </table>
+                            </div>
+                        ) : (
+                            <div style={{ textAlign: 'center', color: 'var(--color-muted)', padding: '24px 0' }}>该合同暂无检测项目清单</div>
+                        )}
+
+                        <div className="page-actions" style={{ marginTop: 16 }}>
+                            <button type="button" className="btn btn-secondary" onClick={() => setViewingContract(null)}>关闭</button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </>
     );
 }

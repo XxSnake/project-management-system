@@ -22,7 +22,7 @@ const srcRoot = path.join(__dirname, '..', '..');
 const PDF_IMAGE_SCALE = Number(process.env.CONTRACT_PDF_IMAGE_SCALE || '2');
 const VISION_INFO_MAX_TOKENS = Number(process.env.CONTRACT_VISION_INFO_MAX_TOKENS || '1536');
 const VISION_PRICE_MAX_TOKENS = Number(process.env.CONTRACT_VISION_PRICE_MAX_TOKENS || '8192');
-const TEXT_MAX_TOKENS = Number(process.env.CONTRACT_TEXT_MAX_TOKENS || '6144');
+const TEXT_MAX_TOKENS = Number(process.env.CONTRACT_TEXT_MAX_TOKENS || '16384');
 const GLM_REQUEST_TIMEOUT_MS = Number(process.env.CONTRACT_GLM_TIMEOUT_MS || '90000');
 const GLM_OCR_REQUEST_TIMEOUT_MS = Number(process.env.CONTRACT_GLM_OCR_TIMEOUT_MS || '120000');
 const PRICE_BATCH_SIZE = Number(process.env.CONTRACT_PRICE_BATCH_SIZE || '3');
@@ -720,39 +720,45 @@ async function callGLMText(text) {
  */
 function parseGLMResponse(contentObj) {
     // 兼容传入整个 message 对象（含 reasoning_content）
-    let content = typeof contentObj === 'string' ? contentObj : (contentObj.content || contentObj.reasoning_content || '');
+    const actualContent = typeof contentObj === 'string' ? contentObj : (contentObj.content || '');
+    const reasoningContent = typeof contentObj === 'string' ? '' : (contentObj.reasoning_content || '');
 
-    // 尝试直接解析
-    try {
-        return JSON.parse(content);
-    } catch (e) {
-        // 模型可能在 JSON 前后加了说明文本或 markdown 代码块标记
-    }
-
-    // 尝试从 markdown 代码块中提取
-    const codeBlockMatch = content.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
-    if (codeBlockMatch) {
+    // 依次尝试从 content 中解析 JSON
+    for (const text of [actualContent, reasoningContent].filter(Boolean)) {
+        // 尝试直接解析
         try {
-            return JSON.parse(codeBlockMatch[1].trim());
+            return JSON.parse(text);
         } catch (e) { /* continue */ }
-    }
 
-    // 尝试提取第一个 { ... } 块
-    const jsonMatch = content.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-        try {
-            return JSON.parse(jsonMatch[0]);
-        } catch (e) { /* continue */ }
+        // 尝试从 markdown 代码块中提取
+        const codeBlockMatch = text.match(/```(?:json)?\s*\n?([\s\S]*?)\n?```/);
+        if (codeBlockMatch) {
+            try {
+                return JSON.parse(codeBlockMatch[1].trim());
+            } catch (e) { /* continue */ }
+        }
+
+        // 尝试提取第一个 { ... } 块
+        const jsonMatch = text.match(/\{[\s\S]*\}/);
+        if (jsonMatch) {
+            try {
+                return JSON.parse(jsonMatch[0]);
+            } catch (e) { /* continue */ }
+        }
     }
 
     // ==========================================
-    // 终极兜底：当 JSON 被阶段或全在 reasoning_content 里时，使用正则强行提取
+    // 终极兜底：JSON 被截断或全在 reasoning_content 里时，使用正则强行提取
     // ==========================================
+    const allText = [actualContent, reasoningContent].filter(Boolean).join('\n');
+
     const items = [];
+
+    // 方式1：JSON 风格的 key-value 提取
     const itemRegex = /testCategory["']?\s*[:：]\s*["']([^"']+)["'].*?testItemName["']?\s*[:：]\s*["']([^"']+)["'].*?unit["']?\s*[:：]\s*["']([^"']+)["'].*?quantity["']?\s*[:：]\s*([\d.]+).*?unitPrice["']?\s*[:：]\s*([\d.]+).*?totalPrice["']?\s*[:：]\s*([\d.]+)/gs;
 
     let m;
-    while ((m = itemRegex.exec(content)) !== null) {
+    while ((m = itemRegex.exec(allText)) !== null) {
         items.push({
             testCategory: m[1],
             testItemName: m[2],
@@ -763,24 +769,115 @@ function parseGLMResponse(contentObj) {
         });
     }
 
-    if (items.length > 0 || content.includes('contractNo')) {
+    // 方式2：从 reasoning_content 的中文结构化分析中提取（GLM-5 思考模型常见格式）
+    // reasoning_content 中每个项目的格式通常是多行 markdown 列表：
+    //   *   类别：XXX
+    //   *   项目：YYY
+    //   *   单位：ZZZ
+    //   *   数量：N
+    //   *   单价：N
+    //   *   总价：N
+    if (items.length === 0 && reasoningContent) {
+        // 先尝试单行格式："类别：XXX，项目：YYY，单位：ZZZ，数量：N，单价：N，总价：N"
+        const inlineRegex = /类别[：:]\s*(.+?)[，,].*?项目[：:]\s*(.+?)[，,].*?单位[：:]\s*(.+?)[，,.].*?数量[：:]\s*([\d.]+).*?单价[：:]\s*([\d.]+).*?总价[：:]\s*([\d.]+)/g;
+        let bm;
+        while ((bm = inlineRegex.exec(reasoningContent)) !== null) {
+            items.push({
+                testCategory: bm[1].trim(),
+                testItemName: bm[2].trim(),
+                unit: bm[3].trim(),
+                quantity: Number(bm[4]),
+                unitPrice: Number(bm[5]),
+                totalPrice: Number(bm[6])
+            });
+        }
+
+        // 多行 markdown 列表格式提取
+        if (items.length === 0) {
+            // 按 "**第N行" 或 numbered heading 分块
+            const blockRegex = /\*\*第?\d+[行行].*?\*\*[\s\S]*?(?=\*\*第?\d+[行行]|\n\n\*\*[^*]|$)/g;
+            let block;
+            while ((block = blockRegex.exec(reasoningContent)) !== null) {
+                const text = block[0];
+                const catMatch = text.match(/类别[：:]\s*(.+?)(?:\n|$)/);
+                const nameMatch = text.match(/项目[：:]\s*(.+?)(?:[。\n]|$)/);
+                const unitMatch = text.match(/单位[：:]\s*(.+?)(?:[。\n]|$)/);
+                const qtyMatch = text.match(/数量[：:]\s*([\d.]+)/);
+                const priceMatch = text.match(/单价[：:]\s*([\d.]+)/);
+                const totalMatch = text.match(/总价[：:]\s*([\d.]+)/);
+                if (nameMatch && qtyMatch && priceMatch) {
+                    items.push({
+                        testCategory: catMatch ? catMatch[1].trim() : '',
+                        testItemName: nameMatch[1].trim().replace(/[。`]/g, ''),
+                        unit: unitMatch ? unitMatch[1].trim().replace(/[。`]/g, '') : '',
+                        quantity: Number(qtyMatch[1]),
+                        unitPrice: Number(priceMatch[1]),
+                        totalPrice: totalMatch ? Number(totalMatch[1]) : (Number(qtyMatch[1]) * Number(priceMatch[1]))
+                    });
+                }
+            }
+        }
+
+        // 逐行扫描提取连续字段块
+        if (items.length === 0) {
+            const lines = reasoningContent.split('\n');
+            let cur = {};
+            const cleanVal = (s) => s.replace(/[`"""\u201c\u201d]/g, '').replace(/[。，,].*$/, '').trim();
+            for (const line of lines) {
+                const catM = line.match(/类别[：:]\s*(.+?)(?:\s*$)/);
+                const nameM = line.match(/项目[：:]\s*(.+?)(?:\s*$)/);
+                const unitM = line.match(/单位[：:]\s*(.+?)(?:\s*$)/);
+                const qtyM = line.match(/数量[：:]\s*([\d.]+)/);
+                const priceM = line.match(/单价[：:]\s*([\d.]+)/);
+                const totalM = line.match(/总价[：:]\s*([\d.]+)/);
+
+                if (catM) cur.testCategory = cleanVal(catM[1]);
+                if (nameM) cur.testItemName = cleanVal(nameM[1]);
+                if (unitM) cur.unit = cleanVal(unitM[1]);
+                if (qtyM) cur.quantity = Number(qtyM[1]);
+                if (priceM) cur.unitPrice = Number(priceM[1]);
+                if (totalM) cur.totalPrice = Number(totalM[1]);
+
+                if (cur.testItemName && cur.quantity !== undefined && cur.unitPrice !== undefined) {
+                    items.push({
+                        testCategory: cur.testCategory || '',
+                        testItemName: cur.testItemName,
+                        unit: cur.unit || '',
+                        quantity: cur.quantity,
+                        unitPrice: cur.unitPrice,
+                        totalPrice: cur.totalPrice || (cur.quantity * cur.unitPrice)
+                    });
+                    cur = {};
+                }
+            }
+        }
+    }
+
+    if (items.length > 0 || allText.includes('contractNo') || allText.includes('合同编号')) {
         const extractField = (fieldName) => {
             const regex = new RegExp(`${fieldName}["']?\\s*[:：]\\s*["']([^"']+)["']`);
-            const match = content.match(regex);
+            const match = allText.match(regex);
             return match ? match[1] : null;
         };
 
+        // 也尝试从中文标签提取基本字段
+        const extractChineseField = (label) => {
+            const regex = new RegExp(`${label}[：:]\\s*[""]?([^""\\n]+?)[""]?(?:[，,。\\n]|$)`);
+            const match = allText.match(regex);
+            return match ? match[1].trim() : null;
+        };
+
         return {
-            contractNo: extractField('contractNo'),
-            clientName: extractField('clientName'),
-            partyB: extractField('partyB'),
-            projectName: extractField('projectName'),
+            contractNo: extractField('contractNo') || extractChineseField('合同编号'),
+            clientName: extractField('clientName') || extractChineseField('甲方'),
+            partyB: extractField('partyB') || extractChineseField('乙方'),
+            projectName: extractField('projectName') || extractChineseField('工程名称'),
             signedDate: extractField('signedDate'),
             priceItems: items
         };
     }
 
-    require('fs').writeFileSync(path.join(srcRoot, '.temp-ocr', `failed_glm_parse_${Date.now()}.txt`), content, 'utf8');
+    require('fs').writeFileSync(path.join(srcRoot, '.temp-ocr', `failed_glm_parse_${Date.now()}.txt`), allText, 'utf8');
     throw new Error(`无法从 GLM 响应中解析 JSON`);
 }
 

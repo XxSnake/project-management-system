@@ -77,6 +77,7 @@ model PriceItem {
   id           Int      @id @default(autoincrement())
   contractId   Int
   contract     Contract @relation(fields: [contractId], references: [id], onDelete: Cascade)
+  testCategory String?
   testItemName String
   quantity     Float?
   unit         String?
