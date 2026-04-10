@@ -48,6 +48,9 @@ export default function ProjectsPage() {
     const [deletingBatch, setDeletingBatch] = useState(false);
     const [linkingProjectId, setLinkingProjectId] = useState(null);
     const [linkingSaving, setLinkingSaving] = useState(false);
+    const [showMerge, setShowMerge] = useState(false);
+    const [mergeTargetId, setMergeTargetId] = useState('');
+    const [merging, setMerging] = useState(false);
 
     const refreshData = async () => {
         const [projectResponse, contractResponse] = await Promise.all([
@@ -207,6 +210,34 @@ export default function ProjectsPage() {
         }
     };
 
+    const handleMerge = async () => {
+        if (!mergeTargetId || selectedIds.length < 2) return;
+        const targetId = Number(mergeTargetId);
+        const sourceIds = selectedIds.filter((id) => id !== targetId);
+        const targetName = projects.find((p) => p.id === targetId)?.name || '';
+        if (!confirm(`确认将 ${sourceIds.length} 个项目合并到「${targetName}」？\n合并后来源项目将被删除，所有工作记录、检测记录、报告都会转移到目标项目。`)) return;
+
+        setMerging(true);
+        try {
+            const res = await fetch('/api/projects/merge', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ targetId, sourceIds }),
+            });
+            const data = await res.json();
+            if (!res.ok) throw new Error(data.error || '合并失败');
+            alert(`合并完成：转移了 ${data.movedWorkLogs} 条工作记录、${data.movedDetectionRecords} 条检测记录、${data.movedTestReports} 条报告，删除了 ${data.deletedProjects} 个来源项目。`);
+            setSelectedIds([]);
+            setShowMerge(false);
+            setMergeTargetId('');
+            await refreshData();
+        } catch (err) {
+            alert(err.message);
+        } finally {
+            setMerging(false);
+        }
+    };
+
     const handleOpenContractUpload = (project) => {
         if (!project?.id) {
             return;
@@ -281,6 +312,9 @@ export default function ProjectsPage() {
                 </div>
                 <div className="page-actions">
                     <button type="button" className="btn btn-secondary" onClick={() => void refreshData()}>刷新</button>
+                    <button type="button" className="btn btn-secondary" onClick={() => { setShowMerge(true); setMergeTargetId(''); }} disabled={selectedIds.length < 2}>
+                        合并项目 ({selectedIds.length})
+                    </button>
                     <button type="button" className="btn btn-danger" onClick={() => void handleBatchDelete()} disabled={!selectedIds.length || deletingBatch}>
                         {deletingBatch ? '批量删除中' : `批量删除 (${selectedIds.length})`}
                     </button>
@@ -481,6 +515,45 @@ export default function ProjectsPage() {
                     )}
                 </section>
             </div>
+
+            {/* Merge Dialog */}
+            {showMerge && selectedIds.length >= 2 && (
+                <div style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(4px)' }} onClick={() => setShowMerge(false)}>
+                    <div className="card stack" style={{ width: '90%', maxWidth: 520, padding: 24 }} onClick={(e) => e.stopPropagation()}>
+                        <div className="panel-eyebrow">Merge Projects</div>
+                        <div className="panel-title" style={{ marginBottom: 4 }}>合并项目</div>
+                        <div className="panel-note" style={{ marginBottom: 16 }}>选择一个目标项目，其余项目的工作记录、检测记录和报告将全部转移到目标项目，来源项目随后删除。</div>
+
+                        <div className="form-group">
+                            <label>选择保留的目标项目</label>
+                            <select className="form-select" value={mergeTargetId} onChange={(e) => setMergeTargetId(e.target.value)}>
+                                <option value="">请选择...</option>
+                                {selectedIds.map((id) => {
+                                    const p = projects.find((proj) => proj.id === id);
+                                    return p ? <option key={id} value={id}>{p.name}</option> : null;
+                                })}
+                            </select>
+                        </div>
+
+                        {mergeTargetId && (
+                            <div style={{ marginTop: 12 }}>
+                                <div className="panel-note" style={{ marginBottom: 8 }}>以下项目将被合并（删除）：</div>
+                                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                                    {selectedIds.filter((id) => id !== Number(mergeTargetId)).map((id) => {
+                                        const p = projects.find((proj) => proj.id === id);
+                                        return p ? <span key={id} className="badge badge-warning" style={{ fontSize: '0.78rem' }}>{p.name}</span> : null;
+                                    })}
+                                </div>
+                            </div>
+                        )}
+
+                        <div className="page-actions" style={{ marginTop: 20 }}>
+                            <button type="button" className="btn btn-secondary" onClick={() => setShowMerge(false)}>取消</button>
+                            <button type="button" className="btn btn-primary" onClick={() => void handleMerge()} disabled={!mergeTargetId || merging}>{merging ? '合并中...' : '确认合并'}</button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </>
     );
 }
