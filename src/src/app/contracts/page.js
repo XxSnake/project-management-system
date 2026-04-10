@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { Suspense, useCallback, useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 
 const EMPTY_FORM = {
@@ -31,7 +31,15 @@ function extractProjectNameFromNotes(notes) {
     return m ? m[1].trim() : '';
 }
 
-export default function ContractsPage() {
+export default function ContractsPageWrapper() {
+    return (
+        <Suspense fallback={<div className="page-body">加载中…</div>}>
+            <ContractsPage />
+        </Suspense>
+    );
+}
+
+function ContractsPage() {
     const router = useRouter();
     const searchParams = useSearchParams();
     const lockedProjectId = searchParams.get('projectId');
@@ -295,9 +303,9 @@ export default function ContractsPage() {
                                     <thead>
                                         <tr>
                                             <th>检测项目</th>
-                                            <th style={{ width: 100 }}>数量</th>
-                                            <th style={{ width: 80 }}>单位</th>
-                                            <th style={{ width: 120 }}>单价</th>
+                                            <th style={{ width: 130 }}>数量</th>
+                                            <th style={{ width: 110 }}>单位</th>
+                                            <th style={{ width: 150 }}>单价</th>
                                             <th style={{ width: 60 }}></th>
                                         </tr>
                                     </thead>
@@ -307,9 +315,9 @@ export default function ContractsPage() {
                                         ) : form.priceItems.map((item, idx) => (
                                             <tr key={idx}>
                                                 <td><input className="form-input" value={item.testItemName} onChange={(e) => updatePriceItem(idx, 'testItemName', e.target.value)} /></td>
-                                                <td><input className="form-input" type="number" value={item.quantity} onChange={(e) => updatePriceItem(idx, 'quantity', e.target.value)} /></td>
-                                                <td><input className="form-input" value={item.unit} onChange={(e) => updatePriceItem(idx, 'unit', e.target.value)} /></td>
-                                                <td><input className="form-input" type="number" value={item.unitPrice} onChange={(e) => updatePriceItem(idx, 'unitPrice', e.target.value)} /></td>
+                                                <td><input className="form-input" type="number" step="0.0001" value={item.quantity} onChange={(e) => updatePriceItem(idx, 'quantity', e.target.value)} style={{ minWidth: 110 }} /></td>
+                                                <td><input className="form-input" value={item.unit} onChange={(e) => updatePriceItem(idx, 'unit', e.target.value)} style={{ minWidth: 90 }} /></td>
+                                                <td><input className="form-input" type="number" step="0.0001" value={item.unitPrice} onChange={(e) => updatePriceItem(idx, 'unitPrice', e.target.value)} style={{ minWidth: 130 }} /></td>
                                                 <td><button type="button" className="btn btn-danger" style={{ minHeight: 24, padding: '0 8px', fontSize: '0.68rem' }} onClick={() => removePriceItem(idx)}>删</button></td>
                                             </tr>
                                         ))}

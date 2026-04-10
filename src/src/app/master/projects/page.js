@@ -418,7 +418,7 @@ export default function ProjectsPage() {
                                                         aria-label={`选择项目 ${project.name}`}
                                                     />
                                                 </td>
-                                                <td style={{ fontWeight: 600 }}>{project.name}</td>
+                                                <td style={{ fontWeight: 600 }}><a href={`/master/projects/${project.id}`} onClick={(e) => { e.preventDefault(); router.push(`/master/projects/${project.id}`); }} style={{ color: 'inherit', textDecoration: 'none', cursor: 'pointer' }} onMouseEnter={(e) => { e.target.style.color = 'var(--color-accent)'; }} onMouseLeave={(e) => { e.target.style.color = 'inherit'; }}>{project.name}</a></td>
                                                 <td><span className={`badge ${getStatusBadge(project.normalizedStatus)}`}>{project.normalizedStatus}</span></td>
                                                 <td>{project.phase || '-'}</td>
                                                 <td>

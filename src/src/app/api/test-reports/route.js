@@ -77,7 +77,18 @@ async function findOrCreateStaff(name) {
 }
 
 async function saveReportRow(row) {
-    const { project, created: projectCreated } = await findOrCreateProject(row.projectName);
+    let project;
+    let projectCreated = false;
+
+    if (row._forceProjectId) {
+        project = await prisma.project.findUnique({ where: { id: row._forceProjectId } });
+    }
+
+    if (!project) {
+        const result = await findOrCreateProject(row.projectName);
+        project = result.project;
+        projectCreated = result.created;
+    }
 
     const roleAssignments = [];
     const roleStaffMap = {};
@@ -148,6 +159,7 @@ const reportInclude = {
 export async function GET(request) {
     const { searchParams } = new URL(request.url);
     const month = searchParams.get('month');
+    const projectId = searchParams.get('projectId');
 
     const where = {};
     if (month) {
@@ -156,6 +168,12 @@ export async function GET(request) {
             gte: new Date(year, monthIndex - 1, 1),
             lt: new Date(year, monthIndex, 1),
         };
+    }
+    if (projectId) {
+        const pid = Number.parseInt(projectId, 10);
+        if (!Number.isNaN(pid)) {
+            where.projectId = pid;
+        }
     }
 
     const reports = await prisma.testReport.findMany({
@@ -169,11 +187,26 @@ export async function GET(request) {
 
 export async function POST(request) {
     try {
-        const { rawText } = await request.json();
+        const body = await request.json();
+        const { rawText, projectId: forceProjectId } = body;
         const rows = parseReportText(rawText);
 
         if (rows.length === 0) {
             return NextResponse.json({ error: '未能解析出有效的报告记录' }, { status: 400 });
+        }
+
+        // If projectId is provided (from project detail page), force all rows to use it
+        if (forceProjectId) {
+            const pid = Number.parseInt(forceProjectId, 10);
+            if (!Number.isNaN(pid)) {
+                const existingProject = await prisma.project.findUnique({ where: { id: pid } });
+                if (existingProject) {
+                    for (const row of rows) {
+                        row.projectName = existingProject.name;
+                        row._forceProjectId = pid;
+                    }
+                }
+            }
         }
 
         const saved = [];

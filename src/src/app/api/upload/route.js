@@ -2,7 +2,6 @@ import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { parseContract } from '@/lib/contractParser';
-import { normalizeOcrPriceItems } from '@/lib/testItemRegistry';
 
 // POST - upload contract file and auto-parse with OCR
 export async function POST(request) {
@@ -32,12 +31,7 @@ export async function POST(request) {
         parsedData = await parseContract(savedPath, originalName);
         console.log(`[OCR] 解析完成, 置信度: ${parsedData.confidence}, 耗时: ${parsedData.timeMs}ms`);
 
-        // 对 OCR 识别出的价目表项目按标准检测项目列表进行过滤和标准化
-        if (parsedData.success && Array.isArray(parsedData.priceItems)) {
-            const { items, needsConfirmation } = normalizeOcrPriceItems(parsedData.priceItems);
-            parsedData.priceItems = items;
-            parsedData.needsConfirmation = needsConfirmation;
-        }
+        // OCR 识别出的价目表直接传给前端，由用户自行确认编辑
     } catch (err) {
         console.error('[OCR] 合同解析失败:', err.message);
         parsedData = {

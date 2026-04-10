@@ -9,7 +9,6 @@ const navSections = [
         items: [
             { href: '/', code: 'CTL', label: '控制台', note: '实时总览与快捷操作' },
             { href: '/worklog', code: 'LOG', label: '工作记录', note: '日志导入、筛选与批量处理' },
-            { href: '/test-reports', code: 'DOC', label: '检测报告', note: '报告导入与角色产值分配' },
             { href: '/reports', code: 'RPT', label: '产值报表', note: '收入趋势、排行与导出' },
             { href: '/nexus', code: 'NXS', label: 'System Nexus', note: '备份、安全与系统状态' },
         ],

@@ -3,18 +3,19 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 
-const EDITABLE_COLUMNS = [
-    { key: 'testCategory', label: '检测类别' },
+const COLUMNS = [
     { key: 'testItem', label: '检测项目' },
-    { key: 'quantityText', label: '已检测数量' },
+    { key: 'contractQty', label: '合同数量' },
+    { key: 'unitPrice', label: '单价' },
+    { key: 'quantityText', label: '已检数量' },
     { key: 'detectDate', label: '检测时间', type: 'date' },
+    { key: 'mainTester', label: '检测人员' },
     { key: 'reportNo', label: '报告编号' },
-    { key: 'reportEditor', label: '报告编制' },
-    { key: 'mainTester', label: '主检' },
-    { key: 'reviewer', label: '审核' },
-    { key: 'approver', label: '批准' },
     { key: 'remarks', label: '备注' },
 ];
+
+// Editable fields in detection records
+const EDITABLE_KEYS = ['testItem', 'quantityText', 'detectDate', 'mainTester', 'reportNo', 'remarks'];
 
 const DRIFT_FIELDS = {
     testItem: 'srcTestItem',
@@ -49,6 +50,15 @@ function isFieldDrifted(record, colKey) {
     return (record[colKey] || '') !== (record[srcKey] || '');
 }
 
+// Match a detection record's testItem to a contract price item
+function findPriceItem(priceItems, testItem) {
+    if (!testItem || !priceItems || priceItems.length === 0) return null;
+    const normalized = testItem.trim();
+    return priceItems.find((p) => p.testItemName === normalized)
+        || priceItems.find((p) => normalized.includes(p.testItemName) || p.testItemName.includes(normalized))
+        || null;
+}
+
 export default function ProjectDetailPage() {
     const router = useRouter();
     const params = useParams();
@@ -56,6 +66,8 @@ export default function ProjectDetailPage() {
     const [project, setProject] = useState(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
+    const [showAddRecord, setShowAddRecord] = useState(false);
+    const [newRecord, setNewRecord] = useState({});
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -94,15 +106,30 @@ export default function ProjectDetailPage() {
     };
 
     const handleDeleteRecord = async (record) => {
-        if (!confirm('确认删除这条检测记录？（不会影响原始工作记录）')) return;
-        const res = await fetch(`/api/projects/${projectId}/detection-records/${record.id}`, {
-            method: 'DELETE',
-        });
+        if (!confirm('确认删除这条记录？')) return;
+        const res = await fetch(`/api/projects/${projectId}/detection-records/${record.id}`, { method: 'DELETE' });
         if (!res.ok) {
             const data = await res.json().catch(() => ({}));
             alert(data.error || '删除失败');
             return;
         }
+        await load();
+    };
+
+    const handleAddRecord = async () => {
+        const payload = { ...newRecord, projectId: Number(projectId) };
+        const res = await fetch(`/api/projects/${projectId}/detection-records`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+        });
+        if (!res.ok) {
+            const data = await res.json().catch(() => ({}));
+            alert(data.error || '新增失败');
+            return;
+        }
+        setNewRecord({});
+        setShowAddRecord(false);
         await load();
     };
 
@@ -112,79 +139,84 @@ export default function ProjectDetailPage() {
 
     const contract = project.contract;
     const priceItems = contract?.priceItems || [];
-    const contractAmount = contract?.pricingMode === 'area'
-        ? (contract?.areaPricingAmount || 0)
-        : priceItems.reduce((sum, p) => sum + (Number(p.unitPrice) || 0) * (Number(p.quantity) || 0), 0);
+    const records = project.detectionRecords || [];
 
     return (
         <>
             <div className="page-header">
                 <div>
                     <div className="page-kicker">Project Detail</div>
-                    <h2>{project.name}</h2>
+                    <h2 style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                        {project.name}
+                        {contract ? (
+                            <a
+                                href="/contracts"
+                                onClick={(e) => { e.preventDefault(); router.push('/contracts'); }}
+                                className="badge badge-info"
+                                style={{ fontSize: '0.7rem', cursor: 'pointer', textDecoration: 'none', fontWeight: 500 }}
+                                title={`合同：${contract.contractNo} · ${contract.clientName || ''}`}
+                            >
+                                {contract.contractNo}
+                            </a>
+                        ) : (
+                            <a
+                                href={`/contracts?projectId=${projectId}&projectName=${encodeURIComponent(project.name)}`}
+                                onClick={(e) => { e.preventDefault(); router.push(`/contracts?projectId=${projectId}&projectName=${encodeURIComponent(project.name)}`); }}
+                                className="badge badge-warning"
+                                style={{ fontSize: '0.7rem', cursor: 'pointer', textDecoration: 'none', fontWeight: 500 }}
+                            >
+                                未关联合同
+                            </a>
+                        )}
+                    </h2>
                     <p className="page-desc">
                         状态：{project.status}
                         {project.phase ? ` · 阶段：${project.phase}` : ''}
+                        {contract?.clientName ? ` · 甲方：${contract.clientName}` : ''}
                     </p>
                 </div>
                 <div className="page-actions">
                     <button type="button" className="btn btn-secondary" onClick={() => router.push('/master/projects')}>返回列表</button>
                     <button type="button" className="btn btn-secondary" onClick={() => void load()}>刷新</button>
+                    <button type="button" className="btn btn-primary" onClick={() => setShowAddRecord(!showAddRecord)}>{showAddRecord ? '取消添加' : '添加记录'}</button>
                 </div>
             </div>
 
             <div className="page-body">
-                <section className="card stack">
-                    <div className="card-header">
-                        <div className="card-copy">
-                            <div className="panel-eyebrow">Contract</div>
-                            <div className="panel-title">合同信息</div>
+                {/* Add Record Form */}
+                {showAddRecord && (
+                    <div className="card stack" style={{ padding: 16, marginBottom: 16 }}>
+                        <div className="panel-note" style={{ marginBottom: 8 }}>手工添加一条检测记录</div>
+                        <div className="form-grid">
+                            {COLUMNS.filter((col) => EDITABLE_KEYS.includes(col.key)).map((col) => (
+                                <div key={col.key} className="form-group">
+                                    <label>{col.label}</label>
+                                    <input
+                                        className="form-input"
+                                        type={col.type === 'date' ? 'date' : 'text'}
+                                        value={newRecord[col.key] || ''}
+                                        onChange={(e) => setNewRecord((prev) => ({ ...prev, [col.key]: e.target.value }))}
+                                    />
+                                </div>
+                            ))}
+                        </div>
+                        <div className="page-actions" style={{ marginTop: 12 }}>
+                            <button type="button" className="btn btn-primary" onClick={() => void handleAddRecord()}>确认添加</button>
                         </div>
                     </div>
-                    {contract ? (
-                        <>
-                            <div className="form-grid">
-                                <div className="form-group"><label>客户</label><div>{contract.clientName || '-'}</div></div>
-                                <div className="form-group"><label>合同金额</label><div>{contractAmount ? `¥ ${Number(contractAmount).toLocaleString()}` : '-'}</div></div>
-                                <div className="form-group"><label>计价方式</label><div>{contract.pricingMode === 'area' ? '按面积' : '按单价'}</div></div>
-                            </div>
-                            <div className="data-table-shell" style={{ marginTop: 12 }}>
-                                <table className="data-table">
-                                    <thead>
-                                        <tr>
-                                            <th>检测项目</th>
-                                            <th>数量</th>
-                                            <th>单位</th>
-                                            <th>单价</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {priceItems.length === 0 ? (
-                                            <tr><td colSpan={4} style={{ textAlign: 'center', color: 'var(--color-muted)' }}>无检测项目清单</td></tr>
-                                        ) : priceItems.map((item) => (
-                                            <tr key={item.id}>
-                                                <td>{item.testItemName}</td>
-                                                <td>{item.quantity ?? '-'}</td>
-                                                <td>{item.unit || '-'}</td>
-                                                <td>{item.unitPrice}</td>
-                                            </tr>
-                                        ))}
-                                    </tbody>
-                                </table>
-                            </div>
-                        </>
-                    ) : (
-                        <div className="empty-state"><div>未关联合同</div></div>
-                    )}
-                </section>
+                )}
 
-                <section className="table-shell" style={{ marginTop: 16 }}>
+                {/* Unified Table */}
+                <section className="table-shell">
                     <div className="card-header">
                         <div className="card-copy">
-                            <div className="panel-eyebrow">Detection Records</div>
-                            <div className="panel-title">检测记录</div>
+                            <div className="panel-eyebrow">Detection &amp; Report Records</div>
+                            <div className="panel-title">检测与报告记录</div>
                             <div className="panel-note">
-                                表格为独立覆盖层，直接编辑单元格保存。<span style={{ color: '#e67e22', fontWeight: 600 }}>橙色背景</span>表示该字段与工作记录原始数据不一致。
+                                直接点击单元格即可编辑。合同数量和单价从关联合同自动匹配。
+                                {records.some((r) => Object.keys(DRIFT_FIELDS).some((k) => isFieldDrifted(r, k))) && (
+                                    <span style={{ marginLeft: 8 }}><span style={{ color: '#e67e22', fontWeight: 600 }}>橙色背景</span>表示与工作记录原始数据不一致。</span>
+                                )}
                             </div>
                         </div>
                     </div>
@@ -192,53 +224,71 @@ export default function ProjectDetailPage() {
                         <table className="data-table">
                             <thead>
                                 <tr>
-                                    <th style={{ width: 60 }}>序号</th>
-                                    {EDITABLE_COLUMNS.map((c) => <th key={c.key}>{c.label}</th>)}
-                                    <th style={{ width: 80 }}>操作</th>
+                                    <th style={{ width: 50 }}>序号</th>
+                                    {COLUMNS.map((c) => <th key={c.key}>{c.label}</th>)}
+                                    <th style={{ width: 60 }}>操作</th>
                                 </tr>
                             </thead>
                             <tbody>
-                                {project.detectionRecords.length === 0 ? (
-                                    <tr><td colSpan={EDITABLE_COLUMNS.length + 2} style={{ textAlign: 'center', color: 'var(--color-muted)' }}>暂无检测记录</td></tr>
-                                ) : project.detectionRecords.map((record) => (
-                                    <tr key={record.id}>
-                                        <td>{record.sequence}</td>
-                                        {EDITABLE_COLUMNS.map((col) => {
-                                            const drifted = isFieldDrifted(record, col.key);
-                                            const cellStyle = drifted ? { background: '#ffe8cc' } : undefined;
-                                            const title = drifted
-                                                ? `工作记录原值：${col.key === 'detectDate' ? formatDateDisplay(record[DRIFT_FIELDS[col.key]]) : (record[DRIFT_FIELDS[col.key]] || '(空)')}`
-                                                : undefined;
-                                            if (col.type === 'date') {
+                                {records.length === 0 ? (
+                                    <tr><td colSpan={COLUMNS.length + 2} style={{ textAlign: 'center', color: 'var(--color-muted)', padding: '32px 0' }}>暂无记录，可通过工作记录自动同步或点击「添加记录」手工新增</td></tr>
+                                ) : records.map((record) => {
+                                    const matched = findPriceItem(priceItems, record.testItem);
+                                    return (
+                                        <tr key={record.id}>
+                                            <td style={{ textAlign: 'center', color: 'var(--color-muted)', fontSize: '0.8rem' }}>{record.sequence}</td>
+                                            {COLUMNS.map((col) => {
+                                                // Contract fields: read-only, auto-matched
+                                                if (col.key === 'contractQty') {
+                                                    return <td key={col.key} style={{ color: matched ? 'inherit' : 'var(--color-muted)' }}>{matched ? `${matched.quantity ?? '-'} ${matched.unit || ''}`.trim() : '-'}</td>;
+                                                }
+                                                if (col.key === 'unitPrice') {
+                                                    return <td key={col.key} style={{ color: matched ? 'inherit' : 'var(--color-muted)' }}>{matched ? `¥${Number(matched.unitPrice).toFixed(2)}` : '-'}</td>;
+                                                }
+
+                                                // Non-editable fields
+                                                if (!EDITABLE_KEYS.includes(col.key)) {
+                                                    return <td key={col.key}>{record[col.key] || '-'}</td>;
+                                                }
+
+                                                // Editable fields
+                                                const drifted = isFieldDrifted(record, col.key);
+                                                const cellStyle = drifted ? { background: '#ffe8cc' } : undefined;
+                                                const title = drifted
+                                                    ? `工作记录原值：${col.key === 'detectDate' ? formatDateDisplay(record[DRIFT_FIELDS[col.key]]) : (record[DRIFT_FIELDS[col.key]] || '(空)')}`
+                                                    : undefined;
+
+                                                if (col.type === 'date') {
+                                                    return (
+                                                        <td key={col.key} style={cellStyle} title={title}>
+                                                            <input
+                                                                type="date"
+                                                                defaultValue={toDateInputValue(record[col.key])}
+                                                                onBlur={(e) => void handleSaveCell(record, col.key, e.target.value)}
+                                                                style={{ width: '100%', background: 'transparent', border: '1px dashed transparent', padding: 2 }}
+                                                                onFocus={(e) => { e.target.style.border = '1px dashed var(--color-border)'; }}
+                                                            />
+                                                        </td>
+                                                    );
+                                                }
                                                 return (
                                                     <td key={col.key} style={cellStyle} title={title}>
                                                         <input
-                                                            type="date"
-                                                            defaultValue={toDateInputValue(record[col.key])}
+                                                            type="text"
+                                                            defaultValue={record[col.key] || ''}
                                                             onBlur={(e) => void handleSaveCell(record, col.key, e.target.value)}
                                                             style={{ width: '100%', background: 'transparent', border: '1px dashed transparent', padding: 2 }}
                                                             onFocus={(e) => { e.target.style.border = '1px dashed var(--color-border)'; }}
                                                         />
                                                     </td>
                                                 );
-                                            }
-                                            return (
-                                                <td key={col.key} style={cellStyle} title={title}>
-                                                    <input
-                                                        type="text"
-                                                        defaultValue={record[col.key] || ''}
-                                                        onBlur={(e) => void handleSaveCell(record, col.key, e.target.value)}
-                                                        style={{ width: '100%', background: 'transparent', border: '1px dashed transparent', padding: 2 }}
-                                                        onFocus={(e) => { e.target.style.border = '1px dashed var(--color-border)'; }}
-                                                    />
-                                                </td>
-                                            );
-                                        })}
-                                        <td>
-                                            <button type="button" className="btn btn-danger" style={{ minHeight: 28, padding: '0 10px', fontSize: '0.7rem' }} onClick={() => void handleDeleteRecord(record)}>删除</button>
-                                        </td>
-                                    </tr>
-                                ))}
+                                            })}
+                                            <td>
+                                                <button type="button" className="btn btn-danger" style={{ minHeight: 28, padding: '0 8px', fontSize: '0.7rem' }} onClick={() => void handleDeleteRecord(record)}>删除</button>
+                                            </td>
+                                        </tr>
+                                    );
+                                })}
                             </tbody>
                         </table>
                     </div>
