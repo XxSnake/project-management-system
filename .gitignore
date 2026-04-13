@@ -6,8 +6,8 @@ node_modules/
 out/
 build/
 
-# database (local dev data, not for version control)
-*.db
+# database — now tracked for multi-machine sync
+# *.db
 
 # uploaded contracts (user files, not source code)
 /contracts/
@@ -65,9 +65,9 @@ package-lock.json
 # Claude settings (local)
 .claude/
 
-# startup scripts (local machine specific)
-*.vbs
-*.cmd
+# startup scripts — now tracked for multi-machine sync
+# *.vbs
+# *.cmd
 
 # assets (large binary files)
 assets/

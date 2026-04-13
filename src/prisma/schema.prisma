@@ -29,6 +29,7 @@ model Contract {
   pricingMode       String    @default("unit")
   areaPricingAmount Float?
   areaPricingArea   Float?
+  lumpSumAmount     Float?
   createdAt         DateTime  @default(now())
   projects          Project[]
   priceItems        PriceItem[]

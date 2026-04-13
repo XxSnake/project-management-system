@@ -138,6 +138,44 @@ export async function calculateProductionValue(workLog, staffIds) {
     }
 
     // ═══════════════════════════════════════════════════
+    // 方案D：包干价合同按占比计算
+    // ═══════════════════════════════════════════════════
+    if (pricingMode === 'lumpsum' && hasContract) {
+        const allocationShare = normalizeAllocationShare(workLog?.allocationShare);
+        const lumpSumAmount = Number.parseFloat(contract.lumpSumAmount);
+
+        if (!Number.isFinite(lumpSumAmount) || lumpSumAmount <= 0) {
+            return {
+                status: 'lumpsum-contract-incomplete',
+                mode: 'lumpsum',
+                message: '包干价合同尚未配置包干总价',
+            };
+        }
+
+        if (allocationShare === null) {
+            return {
+                status: 'pending-area-share',
+                mode: 'lumpsum',
+                pendingAllocation: buildPendingAllocation(workLog, contract),
+            };
+        }
+
+        const totalValue = lumpSumAmount * allocationShare;
+
+        return createProductionValues({
+            workLog,
+            staffIds,
+            totalValue,
+            unitPriceUsed: lumpSumAmount,
+            priceSource: `包干价合同占比 ${(allocationShare * 100).toFixed(2).replace(/\.?0+$/u, '')}%`,
+            calculationMode: 'lumpsum',
+            workloadShare: allocationShare,
+            project,
+            contract,
+        });
+    }
+
+    // ═══════════════════════════════════════════════════
     // 方案B：面积合同按占比计算
     // ═══════════════════════════════════════════════════
     if (pricingMode === 'area' && hasContract) {
@@ -179,7 +217,7 @@ export async function calculateProductionValue(workLog, staffIds) {
     // ═══════════════════════════════════════════════════
     // 方案A：单价合同按单价×数量计算
     // ═══════════════════════════════════════════════════
-    if (hasContract && pricingMode === 'unit') {
+    if (hasContract && (pricingMode === 'unit' || pricingMode === 'mixed')) {
         const matchedPrice = await findBestPriceMatch({
             ...workLog,
             project,
@@ -349,8 +387,8 @@ export async function retroactiveCalculation(projectId) {
             continue;
         }
 
-        if (pricingMode === 'area') {
-            // 面积合同：需要用户逐条补填占比
+        if (pricingMode === 'area' || pricingMode === 'lumpsum') {
+            // 面积/包干价合同：需要用户逐条补填占比
             const allocationShare = normalizeAllocationShare(log.allocationShare);
             if (allocationShare === null) {
                 results.pendingAreaShare += 1;

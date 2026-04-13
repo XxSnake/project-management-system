@@ -70,7 +70,7 @@ function getLogMeta(log) {
         staffCount,
         workloadPerStaff: staffCount > 0 ? quantity / staffCount : 0,
         hasContract: Boolean(contract?.id),
-        isAreaPending: Boolean(contract?.id) && pricingMode === 'area' && totalValue <= 0,
+        isAreaPending: Boolean(contract?.id) && (pricingMode === 'area' || pricingMode === 'lumpsum') && totalValue <= 0,
         isExceeded,
     };
 }
@@ -377,7 +377,7 @@ export function buildWorklogDetailRows(logs) {
                 单位: log.unit || '',
                 人员: item.staff?.name || '',
                 工作量分摊: item.staffId ? Number(meta.workloadPerStaff.toFixed(2)) : meta.quantity,
-                计价方式: meta.pricingMode === 'area' && meta.hasContract ? '面积合同' : (meta.hasContract ? '单价合同' : '未签合同'),
+                计价方式: !meta.hasContract ? '未签合同' : ({ area: '面积合同', mixed: '混合计费', lumpsum: '包干价' }[meta.pricingMode] || '单价合同'),
                 占比: meta.share === null ? '' : `${(meta.share * 100).toFixed(2).replace(/\.?0+$/u, '')}%`,
                 产值: Number((production?.value || 0).toFixed(2)),
                 原始产值: production?.exceeded ? Number((production?.originalValue || 0).toFixed(2)) : '',

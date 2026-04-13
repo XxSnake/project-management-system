@@ -305,7 +305,7 @@ export default function ProjectDetailPage() {
                             {viewingContract.contractNo || `合同 #${viewingContract.id}`}
                         </div>
                         <div className="panel-note" style={{ marginBottom: 16 }}>
-                            {[viewingContract.clientName && `委托方：${viewingContract.clientName}`, viewingContract.partyB && `受托方：${viewingContract.partyB}`, viewingContract.signedDate && `签订日期：${new Date(viewingContract.signedDate).toLocaleDateString('zh-CN')}`, viewingContract.pricingMode === 'area' ? `按面积计价 · 总价 ¥${Number(viewingContract.areaPricingAmount || 0).toLocaleString()} · 面积 ${viewingContract.areaPricingArea || '-'}` : '按单价计价'].filter(Boolean).join(' · ')}
+                            {[viewingContract.clientName && `委托方：${viewingContract.clientName}`, viewingContract.partyB && `受托方：${viewingContract.partyB}`, viewingContract.signedDate && `签订日期：${new Date(viewingContract.signedDate).toLocaleDateString('zh-CN')}`, ({ area: `按面积计价 · 总价 ¥${Number(viewingContract.areaPricingAmount || 0).toLocaleString()} · 面积 ${viewingContract.areaPricingArea || '-'}`, mixed: `混合计费 · 面积部分 ¥${Number(viewingContract.areaPricingAmount || 0).toLocaleString()} · 面积 ${viewingContract.areaPricingArea || '-'}`, lumpsum: `包干价 · 总价 ¥${Number(viewingContract.lumpSumAmount || 0).toLocaleString()}` }[viewingContract.pricingMode] || '按单价计价')].filter(Boolean).join(' · ')}
                         </div>
 
                         {(viewingContract.priceItems || []).length > 0 ? (

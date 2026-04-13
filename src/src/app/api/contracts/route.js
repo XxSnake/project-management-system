@@ -55,7 +55,8 @@ export async function POST(request) {
             }
         }
 
-        const pricingMode = data.pricingMode === 'area' ? 'area' : 'unit';
+        const validModes = ['unit', 'area', 'mixed', 'lumpsum'];
+        const pricingMode = validModes.includes(data.pricingMode) ? data.pricingMode : 'unit';
         const priceItems = Array.isArray(data.priceItems) ? data.priceItems : [];
 
         // 创建合同 + 价目表
@@ -68,8 +69,9 @@ export async function POST(request) {
                 signedDate: data.signedDate ? new Date(data.signedDate) : null,
                 notes: data.notes || buildNotes(projectName || targetProject?.name, data.fileName),
                 pricingMode,
-                areaPricingAmount: pricingMode === 'area' ? (Number(data.areaPricingAmount) || null) : null,
-                areaPricingArea: pricingMode === 'area' ? (Number(data.areaPricingArea) || null) : null,
+                areaPricingAmount: (pricingMode === 'area' || pricingMode === 'mixed') ? (Number(data.areaPricingAmount) || null) : null,
+                areaPricingArea: (pricingMode === 'area' || pricingMode === 'mixed') ? (Number(data.areaPricingArea) || null) : null,
+                lumpSumAmount: pricingMode === 'lumpsum' ? (Number(data.lumpSumAmount) || null) : null,
                 priceItems: {
                     create: priceItems
                         .filter((item) => item && item.testItemName)
@@ -111,6 +113,68 @@ export async function POST(request) {
         });
     } catch (error) {
         console.error('[contracts POST]', error);
+        return NextResponse.json({ error: error.message }, { status: 500 });
+    }
+}
+
+export async function PUT(request) {
+    try {
+        const data = await request.json();
+        const contractId = Number.parseInt(data.id, 10);
+        if (!contractId) {
+            return NextResponse.json({ error: '缺少合同 ID' }, { status: 400 });
+        }
+
+        const existing = await prisma.contract.findUnique({ where: { id: contractId }, include: { projects: true } });
+        if (!existing) {
+            return NextResponse.json({ error: '合同不存在' }, { status: 404 });
+        }
+
+        const validModes = ['unit', 'area', 'mixed', 'lumpsum'];
+        const pricingMode = validModes.includes(data.pricingMode) ? data.pricingMode : existing.pricingMode;
+        const priceItems = Array.isArray(data.priceItems) ? data.priceItems : [];
+
+        // 更新合同基本信息
+        const contract = await prisma.contract.update({
+            where: { id: contractId },
+            data: {
+                contractNo: data.contractNo ?? existing.contractNo,
+                clientName: data.clientName ?? existing.clientName,
+                partyB: data.partyB ?? existing.partyB,
+                signedDate: data.signedDate ? new Date(data.signedDate) : existing.signedDate,
+                pricingMode,
+                areaPricingAmount: (pricingMode === 'area' || pricingMode === 'mixed') ? (Number(data.areaPricingAmount) || null) : null,
+                areaPricingArea: (pricingMode === 'area' || pricingMode === 'mixed') ? (Number(data.areaPricingArea) || null) : null,
+                lumpSumAmount: pricingMode === 'lumpsum' ? (Number(data.lumpSumAmount) || null) : null,
+                notes: data.notes !== undefined ? data.notes : existing.notes,
+            },
+        });
+
+        // 替换价目表：删除旧的，创建新的
+        await prisma.priceItem.deleteMany({ where: { contractId } });
+        if (priceItems.length > 0) {
+            await prisma.priceItem.createMany({
+                data: priceItems
+                    .filter((item) => item && item.testItemName)
+                    .map((item) => ({
+                        contractId,
+                        testCategory: item.testCategory || null,
+                        testItemName: String(item.testItemName).trim(),
+                        quantity: item.quantity != null ? Number(item.quantity) : null,
+                        unit: item.unit || null,
+                        unitPrice: Number(item.unitPrice) || 0,
+                    })),
+            });
+        }
+
+        const updated = await prisma.contract.findUnique({
+            where: { id: contractId },
+            include: { priceItems: true, projects: { select: { id: true, name: true } } },
+        });
+
+        return NextResponse.json({ success: true, contract: updated });
+    } catch (error) {
+        console.error('[contracts PUT]', error);
         return NextResponse.json({ error: error.message }, { status: 500 });
     }
 }

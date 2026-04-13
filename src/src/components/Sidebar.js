@@ -19,7 +19,7 @@ const navSections = [
             { href: '/contracts', code: 'CTR', label: '合同管理', note: '合同识别、批量导入与价目表' },
             { href: '/master/staff', code: 'STF', label: '人员管理', note: '人员档案与角色信息' },
             { href: '/master/projects', code: 'PRJ', label: '项目管理', note: '项目状态、阶段与合同关联' },
-            { href: '/master/prices', code: 'PRC', label: '单价管理', note: '内部指导价与回退策略' },
+            // { href: '/master/prices', code: 'PRC', label: '单价管理', note: '内部指导价与回退策略' },
             { href: '/master/models', code: 'API', label: '模型 API', note: '统一管理 OCR 与推理模型' },
         ],
     },

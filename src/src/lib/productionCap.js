@@ -2,34 +2,47 @@ import prisma from '@/lib/prisma';
 
 /**
  * 获取项目关联合同的总金额（用于100%上限检查）
+ * - 包干价合同：lumpSumAmount
  * - 面积合同：areaPricingAmount
+ * - 混合计费：areaPricingAmount + sum(priceItems)
  * - 单价合同：sum(unitPrice × quantity) from PriceItems
  */
 export async function getContractTotalAmount(contract) {
     if (!contract?.id) return null;
+
+    if (contract.pricingMode === 'lumpsum') {
+        const amount = Number.parseFloat(contract.lumpSumAmount);
+        return Number.isFinite(amount) && amount > 0 ? amount : null;
+    }
 
     if (contract.pricingMode === 'area') {
         const amount = Number.parseFloat(contract.areaPricingAmount);
         return Number.isFinite(amount) && amount > 0 ? amount : null;
     }
 
-    // 单价合同：从 PriceItems 计算总额
+    // 单价部分：从 PriceItems 计算总额
     const priceItems = contract.priceItems || await prisma.priceItem.findMany({
         where: { contractId: contract.id },
     });
 
-    let total = 0;
+    let unitTotal = 0;
     let hasValidItem = false;
     for (const item of priceItems) {
         const price = Number.parseFloat(item.unitPrice);
         const qty = Number.parseFloat(item.quantity);
         if (Number.isFinite(price) && price > 0 && Number.isFinite(qty) && qty > 0) {
-            total += price * qty;
+            unitTotal += price * qty;
             hasValidItem = true;
         }
     }
 
-    return hasValidItem ? total : null;
+    if (contract.pricingMode === 'mixed') {
+        const areaAmount = Number.parseFloat(contract.areaPricingAmount) || 0;
+        const total = unitTotal + areaAmount;
+        return total > 0 ? total : null;
+    }
+
+    return hasValidItem ? unitTotal : null;
 }
 
 /**

@@ -12,16 +12,23 @@ const EMPTY_FORM = {
     pricingMode: 'unit',
     areaPricingAmount: '',
     areaPricingArea: '',
+    lumpSumAmount: '',
     filePath: '',
     fileName: '',
     priceItems: [],
 };
 
 function formatContractAmount(contract) {
+    if (contract.pricingMode === 'lumpsum') {
+        return contract.lumpSumAmount ? `¥ ${Number(contract.lumpSumAmount).toLocaleString()}（包干价）` : '-';
+    }
     if (contract.pricingMode === 'area') {
         return contract.areaPricingAmount ? `¥ ${Number(contract.areaPricingAmount).toLocaleString()}（按面积）` : '-';
     }
     const sum = (contract.priceItems || []).reduce((acc, p) => acc + (Number(p.unitPrice) || 0) * (Number(p.quantity) || 0), 0);
+    if (contract.pricingMode === 'mixed' && contract.areaPricingAmount) {
+        return sum ? `¥ ${(sum + Number(contract.areaPricingAmount)).toLocaleString()}（混合计费）` : '-';
+    }
     return sum ? `¥ ${sum.toLocaleString()}` : '-';
 }
 
@@ -54,6 +61,7 @@ function ContractsPage() {
     });
     const [uploading, setUploading] = useState(false);
     const [saving, setSaving] = useState(false);
+    const [editingId, setEditingId] = useState(null);
 
     const loadContracts = useCallback(async () => {
         const res = await fetch('/api/contracts', { cache: 'no-store' });
@@ -129,61 +137,124 @@ function ContractsPage() {
 
     const handleSubmit = async (event) => {
         event.preventDefault();
-        if (!form.projectName.trim() && !lockedProjectId) {
+        if (!editingId && !form.projectName.trim() && !lockedProjectId) {
             alert('请填写工程名称');
             return;
         }
         setSaving(true);
         try {
-            const payload = {
-                contractNo: form.contractNo || null,
-                clientName: form.clientName || null,
-                partyB: form.partyB || null,
-                projectName: form.projectName.trim(),
-                projectId: lockedProjectId ? Number.parseInt(lockedProjectId, 10) : undefined,
-                signedDate: form.signedDate || null,
-                pricingMode: form.pricingMode,
-                areaPricingAmount: form.areaPricingAmount || null,
-                areaPricingArea: form.areaPricingArea || null,
-                filePath: form.filePath || null,
-                fileName: form.fileName || null,
-                priceItems: form.priceItems
-                    .filter((p) => p.testItemName)
-                    .map((p) => ({
-                        testCategory: p.testCategory || null,
-                        testItemName: p.testItemName,
-                        quantity: p.quantity === '' ? null : Number(p.quantity),
-                        unit: p.unit || null,
-                        unitPrice: p.unitPrice === '' ? 0 : Number(p.unitPrice),
-                    })),
-            };
-            const res = await fetch('/api/contracts', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload),
-            });
+            const priceItems = form.priceItems
+                .filter((p) => p.testItemName)
+                .map((p) => ({
+                    testCategory: p.testCategory || null,
+                    testItemName: p.testItemName,
+                    quantity: p.quantity === '' ? null : Number(p.quantity),
+                    unit: p.unit || null,
+                    unitPrice: p.unitPrice === '' ? 0 : Number(p.unitPrice),
+                }));
+
+            let res;
+            if (editingId) {
+                // 编辑模式
+                res = await fetch('/api/contracts', {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        id: editingId,
+                        contractNo: form.contractNo || null,
+                        clientName: form.clientName || null,
+                        partyB: form.partyB || null,
+                        signedDate: form.signedDate || null,
+                        pricingMode: form.pricingMode,
+                        areaPricingAmount: form.areaPricingAmount || null,
+                        areaPricingArea: form.areaPricingArea || null,
+                        lumpSumAmount: form.lumpSumAmount || null,
+                        priceItems,
+                    }),
+                });
+            } else {
+                // 新建模式
+                res = await fetch('/api/contracts', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        contractNo: form.contractNo || null,
+                        clientName: form.clientName || null,
+                        partyB: form.partyB || null,
+                        projectName: form.projectName.trim(),
+                        projectId: lockedProjectId ? Number.parseInt(lockedProjectId, 10) : undefined,
+                        signedDate: form.signedDate || null,
+                        pricingMode: form.pricingMode,
+                        areaPricingAmount: form.areaPricingAmount || null,
+                        areaPricingArea: form.areaPricingArea || null,
+                        lumpSumAmount: form.lumpSumAmount || null,
+                        filePath: form.filePath || null,
+                        fileName: form.fileName || null,
+                        priceItems,
+                    }),
+                });
+            }
+
             const data = await res.json();
             if (!res.ok) {
                 alert(data.error || '保存失败');
                 return;
             }
-            const r = data.retroactiveResult;
-            if (r && r.status === 'completed' && r.calculated > 0) {
-                alert(`合同已保存并完成产值补算：补算 ${r.calculated} 条记录${r.exceeded > 0 ? `，其中 ${r.exceeded} 条超限` : ''}`);
+
+            if (editingId) {
+                alert('合同已更新');
             } else {
-                alert('合同已保存');
+                const r = data.retroactiveResult;
+                if (r && r.status === 'completed' && r.calculated > 0) {
+                    alert(`合同已保存并完成产值补算：补算 ${r.calculated} 条记录${r.exceeded > 0 ? `，其中 ${r.exceeded} 条超限` : ''}`);
+                } else {
+                    alert('合同已保存');
+                }
             }
+
+            setEditingId(null);
             setForm({ ...EMPTY_FORM, projectName: lockedProjectName || '' });
             setShowForm(Boolean(lockedProjectId));
             await loadContracts();
-            if (lockedProjectId) {
+            if (!editingId && lockedProjectId) {
                 router.push(`/master/projects/${lockedProjectId}`);
-            } else if (manualMode) {
+            } else if (!editingId && manualMode) {
                 router.push('/master/projects');
             }
         } finally {
             setSaving(false);
         }
+    };
+
+    const handleEdit = (contract) => {
+        setEditingId(contract.id);
+        setForm({
+            contractNo: contract.contractNo || '',
+            clientName: contract.clientName || '',
+            partyB: contract.partyB || '',
+            projectName: extractProjectNameFromNotes(contract.notes) || (contract.projects || []).map((p) => p.name).join('、') || '',
+            signedDate: contract.signedDate ? String(contract.signedDate).slice(0, 10) : '',
+            pricingMode: contract.pricingMode || 'unit',
+            areaPricingAmount: contract.areaPricingAmount ?? '',
+            areaPricingArea: contract.areaPricingArea ?? '',
+            lumpSumAmount: contract.lumpSumAmount ?? '',
+            filePath: contract.filePath || '',
+            fileName: '',
+            priceItems: (contract.priceItems || []).map((p) => ({
+                testCategory: p.testCategory || '',
+                testItemName: p.testItemName || '',
+                quantity: p.quantity ?? '',
+                unit: p.unit || '',
+                unitPrice: p.unitPrice ?? '',
+            })),
+        });
+        setShowForm(true);
+    };
+
+    const handleCancelEdit = () => {
+        setEditingId(null);
+        setForm({ ...EMPTY_FORM, projectName: lockedProjectName || '' });
+        setShowForm(Boolean(lockedProjectId) || manualMode);
     };
 
     const handleDelete = async (contract) => {
@@ -232,13 +303,13 @@ function ContractsPage() {
                     <form onSubmit={handleSubmit} className="card stack">
                         <div className="card-header">
                             <div className="card-copy">
-                                <div className="panel-eyebrow">Contract Upload</div>
-                                <div className="panel-title">上传并保存合同</div>
-                                <div className="panel-note">可先上传文件自动识别，或直接手动填写。</div>
+                                <div className="panel-eyebrow">{editingId ? 'Edit Contract' : 'Contract Upload'}</div>
+                                <div className="panel-title">{editingId ? '编辑合同' : '上传并保存合同'}</div>
+                                <div className="panel-note">{editingId ? '修改合同信息和检测项目清单。' : '可先上传文件自动识别，或直接手动填写。'}</div>
                             </div>
                         </div>
 
-                        {manualMode ? null : (
+                        {(manualMode || editingId) ? null : (
                             <div className="form-group">
                                 <label>合同文件（可选）</label>
                                 <input type="file" accept=".pdf,.doc,.docx,.jpg,.jpeg,.png" disabled={uploading} onChange={handleFilePick} />
@@ -248,16 +319,18 @@ function ContractsPage() {
                         )}
 
                         <div className="form-grid">
-                            <div className="form-group">
-                                <label>工程名称 *</label>
-                                <input
-                                    className="form-input"
-                                    required
-                                    disabled={Boolean(lockedProjectId)}
-                                    value={form.projectName}
-                                    onChange={(e) => setForm((c) => ({ ...c, projectName: e.target.value }))}
-                                />
-                            </div>
+                            {editingId ? null : (
+                                <div className="form-group">
+                                    <label>工程名称 *</label>
+                                    <input
+                                        className="form-input"
+                                        required
+                                        disabled={Boolean(lockedProjectId)}
+                                        value={form.projectName}
+                                        onChange={(e) => setForm((c) => ({ ...c, projectName: e.target.value }))}
+                                    />
+                                </div>
+                            )}
                             <div className="form-group">
                                 <label>合同编号</label>
                                 <input className="form-input" value={form.contractNo} onChange={(e) => setForm((c) => ({ ...c, contractNo: e.target.value }))} />
@@ -279,12 +352,14 @@ function ContractsPage() {
                                 <select className="form-select" value={form.pricingMode} onChange={(e) => setForm((c) => ({ ...c, pricingMode: e.target.value }))}>
                                     <option value="unit">按单价</option>
                                     <option value="area">按面积</option>
+                                    <option value="mixed">混合计费</option>
+                                    <option value="lumpsum">包干价</option>
                                 </select>
                             </div>
-                            {form.pricingMode === 'area' ? (
+                            {(form.pricingMode === 'area' || form.pricingMode === 'mixed') ? (
                                 <>
                                     <div className="form-group">
-                                        <label>合同总价</label>
+                                        <label>{form.pricingMode === 'mixed' ? '面积部分总价' : '合同总价'}</label>
                                         <input type="number" className="form-input" value={form.areaPricingAmount} onChange={(e) => setForm((c) => ({ ...c, areaPricingAmount: e.target.value }))} />
                                     </div>
                                     <div className="form-group">
@@ -292,6 +367,12 @@ function ContractsPage() {
                                         <input type="number" className="form-input" value={form.areaPricingArea} onChange={(e) => setForm((c) => ({ ...c, areaPricingArea: e.target.value }))} />
                                     </div>
                                 </>
+                            ) : null}
+                            {form.pricingMode === 'lumpsum' ? (
+                                <div className="form-group">
+                                    <label>包干总价</label>
+                                    <input type="number" className="form-input" value={form.lumpSumAmount} onChange={(e) => setForm((c) => ({ ...c, lumpSumAmount: e.target.value }))} />
+                                </div>
                             ) : null}
                         </div>
 
@@ -304,11 +385,11 @@ function ContractsPage() {
                                 <table className="data-table">
                                     <thead>
                                         <tr>
-                                            <th style={{ width: 140 }}>检测类别</th>
+                                            <th style={{ width: 260 }}>检测类别</th>
                                             <th>检测项目</th>
-                                            <th style={{ width: 100 }}>数量</th>
+                                            <th style={{ width: 130 }}>数量</th>
                                             <th style={{ width: 90 }}>单位</th>
-                                            <th style={{ width: 110 }}>单价</th>
+                                            <th style={{ width: 140 }}>单价</th>
                                             <th style={{ width: 60 }}></th>
                                         </tr>
                                     </thead>
@@ -317,11 +398,11 @@ function ContractsPage() {
                                             <tr><td colSpan={6} style={{ textAlign: 'center', color: 'var(--color-muted)' }}>暂无项目，点击"添加"</td></tr>
                                         ) : form.priceItems.map((item, idx) => (
                                             <tr key={idx}>
-                                                <td><input className="form-input" value={item.testCategory || ''} onChange={(e) => updatePriceItem(idx, 'testCategory', e.target.value)} /></td>
+                                                <td><input className="form-input" value={item.testCategory || ''} onChange={(e) => updatePriceItem(idx, 'testCategory', e.target.value)} style={{ minWidth: 230 }} /></td>
                                                 <td><input className="form-input" value={item.testItemName} onChange={(e) => updatePriceItem(idx, 'testItemName', e.target.value)} /></td>
-                                                <td><input className="form-input" type="number" step="0.0001" value={item.quantity} onChange={(e) => updatePriceItem(idx, 'quantity', e.target.value)} style={{ minWidth: 80 }} /></td>
+                                                <td><input className="form-input" type="text" inputMode="decimal" value={item.quantity} onChange={(e) => updatePriceItem(idx, 'quantity', e.target.value)} style={{ minWidth: 110 }} /></td>
                                                 <td><input className="form-input" value={item.unit} onChange={(e) => updatePriceItem(idx, 'unit', e.target.value)} style={{ minWidth: 70 }} /></td>
-                                                <td><input className="form-input" type="number" step="0.0001" value={item.unitPrice} onChange={(e) => updatePriceItem(idx, 'unitPrice', e.target.value)} style={{ minWidth: 90 }} /></td>
+                                                <td><input className="form-input" type="text" inputMode="decimal" value={item.unitPrice} onChange={(e) => updatePriceItem(idx, 'unitPrice', e.target.value)} style={{ minWidth: 120 }} /></td>
                                                 <td><button type="button" className="btn btn-danger" style={{ minHeight: 24, padding: '0 8px', fontSize: '0.68rem' }} onClick={() => removePriceItem(idx)}>删</button></td>
                                             </tr>
                                         ))}
@@ -331,7 +412,8 @@ function ContractsPage() {
                         </div>
 
                         <div className="page-actions">
-                            <button type="submit" className="btn btn-primary" disabled={saving}>{saving ? '保存中…' : '保存合同'}</button>
+                            {editingId ? <button type="button" className="btn btn-secondary" onClick={handleCancelEdit}>取消编辑</button> : null}
+                            <button type="submit" className="btn btn-primary" disabled={saving}>{saving ? '保存中…' : (editingId ? '更新合同' : '保存合同')}</button>
                         </div>
                     </form>
                 ) : null}
@@ -369,7 +451,10 @@ function ContractsPage() {
                                         <td>{(c.projects || []).map((p) => p.name).join('、') || '-'}</td>
                                         <td>{formatContractAmount(c)}</td>
                                         <td>
-                                            <button type="button" className="btn btn-danger" style={{ minHeight: 28, padding: '0 10px', fontSize: '0.7rem' }} onClick={() => void handleDelete(c)}>删除</button>
+                                            <div className="page-actions">
+                                                <button type="button" className="btn btn-secondary" style={{ minHeight: 28, padding: '0 10px', fontSize: '0.7rem' }} onClick={() => handleEdit(c)}>编辑</button>
+                                                <button type="button" className="btn btn-danger" style={{ minHeight: 28, padding: '0 10px', fontSize: '0.7rem' }} onClick={() => void handleDelete(c)}>删除</button>
+                                            </div>
                                         </td>
                                     </tr>
                                 ))}

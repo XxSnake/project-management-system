@@ -1,5 +1,6 @@
 export function normalizePricingMode(value) {
-    return value === 'area' ? 'area' : 'unit';
+    if (value === 'area' || value === 'mixed' || value === 'lumpsum') return value;
+    return 'unit';
 }
 
 export function normalizeAllocationShare(value) {
@@ -81,6 +82,23 @@ export function getWorklogBillingState(log) {
             code: 'manual-valued',
             label: '手工产值',
             tone: 'approved',
+        };
+    }
+
+    // 包干价合同（方案D）
+    if (pricingMode === 'lumpsum' && hasContract) {
+        if (totalValue > 0) {
+            return {
+                code: 'lumpsum-valued',
+                label: '包干计价',
+                tone: 'approved',
+            };
+        }
+
+        return {
+            code: 'pending-area-share',
+            label: '待确认占比',
+            tone: 'pending',
         };
     }
 
