@@ -14,6 +14,19 @@ export async function POST(request) {
     return NextResponse.json(staff);
 }
 
+// PUT update staff
+export async function PUT(request) {
+    const data = await request.json();
+    if (!data.id) {
+        return NextResponse.json({ error: '缺少人员 ID' }, { status: 400 });
+    }
+    const staff = await prisma.staff.update({
+        where: { id: data.id },
+        data: { name: data.name },
+    });
+    return NextResponse.json(staff);
+}
+
 // DELETE staff
 export async function DELETE(request) {
     const { id } = await request.json();
