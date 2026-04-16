@@ -1,19 +1,15 @@
 import prisma from '@/lib/prisma';
+import {
+    buildProjectDisplayName,
+    buildWorkLogProjectDisplayName,
+    findOrCreateProjectByDisplayName,
+    findProjectByDisplayName,
+} from '@/lib/projectResolver';
 import { calculateProductionValue } from '@/lib/productionCalculator';
 import { syncDetectionRecordFromWorkLog } from '@/lib/detectionRecordSync';
 import { expandWorklogRows, parseWPSWorkbook, parseWPSText } from '@/lib/wpsParser';
 
 import { NextResponse } from 'next/server';
-
-async function findOrCreateProject(projectName) {
-    let project = await prisma.project.findFirst({ where: { name: projectName } });
-    let created = false;
-    if (!project) {
-        project = await prisma.project.create({ data: { name: projectName } });
-        created = true;
-    }
-    return { project, created };
-}
 
 async function findOrCreateStaffIds(staffNames) {
     const staffIds = [];
@@ -36,6 +32,7 @@ function buildPendingAllocationPayload(workLog, calculation) {
 
     return {
         ...calculation.pendingAllocation,
+        projectName: buildWorkLogProjectDisplayName(workLog),
         staffNames: (workLog.staffMembers || [])
             .map((item) => item.staff?.name)
             .filter(Boolean),
@@ -43,13 +40,16 @@ function buildPendingAllocationPayload(workLog, calculation) {
 }
 
 async function saveWorklogRow(row) {
-    const { project, created: projectCreated } = await findOrCreateProject(row.projectName);
+    const existingResolution = await findProjectByDisplayName(row.projectName, null, prisma);
+    const resolvedProject = await findOrCreateProjectByDisplayName(row.projectName, null, prisma);
+    const projectCreated = !existingResolution.project && Boolean(resolvedProject.project?.id);
     const staffIds = await findOrCreateStaffIds(row.staffNames || []);
 
     const workLog = await prisma.workLog.create({
         data: {
             workDate: new Date(row.workDate),
-            projectId: project.id,
+            projectId: resolvedProject.project.id,
+            buildingName: resolvedProject.buildingName,
             testContent: row.testContent,
             quantity: Number.parseFloat(row.quantity) || 0,
             unit: row.unit || null,
@@ -76,7 +76,7 @@ async function saveWorklogRow(row) {
 
     const calculation = await calculateProductionValue(workLog, staffIds);
     await syncDetectionRecordFromWorkLog(workLog.id);
-    return { workLog, calculation, project, projectCreated };
+    return { workLog, calculation, project: resolvedProject.project, projectCreated };
 }
 
 async function resolveImportRows(request) {
@@ -174,7 +174,7 @@ export async function POST(request) {
                 if (projectCreated && project?.id) {
                     newProjects.set(project.id, {
                         id: project.id,
-                        name: project.name,
+                        name: buildProjectDisplayName(project),
                     });
                 }
 

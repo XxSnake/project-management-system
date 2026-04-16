@@ -789,6 +789,61 @@ textarea {
   font-size: 0.8rem;
 }
 
+.inline-edit-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 180px;
+}
+
+.inline-edit-inline {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 88px;
+  gap: 8px;
+  align-items: center;
+}
+
+.inline-edit-input {
+  width: 100%;
+  min-height: 36px;
+  padding: 7px 10px;
+  border-radius: 12px;
+  border: 1px dashed transparent;
+  background: rgba(255, 255, 255, 0.18);
+  color: inherit;
+  transition: border-color var(--transition), background var(--transition), box-shadow var(--transition);
+}
+
+.inline-edit-input:hover {
+  background: rgba(255, 255, 255, 0.56);
+}
+
+.inline-edit-input:focus {
+  outline: none;
+  border-color: rgba(0, 113, 227, 0.3);
+  background: rgba(255, 255, 255, 0.96);
+  box-shadow: 0 0 0 3px rgba(0, 113, 227, 0.08);
+}
+
+.inline-edit-textarea {
+  min-height: 44px;
+  line-height: 1.5;
+  resize: none;
+  overflow: hidden;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.inline-edit-input--muted {
+  color: rgba(54, 65, 82, 0.82);
+}
+
+.inline-edit-hint {
+  color: rgba(54, 65, 82, 0.72);
+  font-size: 0.74rem;
+  line-height: 1.4;
+}
+
 .code-block {
   padding: 16px;
   border-radius: 18px;
@@ -920,6 +975,8 @@ textarea {
 .feed-item-meta {
   color: rgba(70, 90, 120, 0.76);
   font-size: 0.8rem;
+  white-space: pre-wrap;
+  word-break: break-word;
 }
 
 .feed-item-content {
@@ -1042,6 +1099,104 @@ input[type='file'] {
   resize: vertical;
 }
 
+.project-group-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.project-group-toolbar {
+  display: flex;
+  align-items: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.project-group-parent-field {
+  flex: 1 1 320px;
+}
+
+.project-group-list {
+  display: grid;
+  gap: 14px;
+}
+
+.project-group-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1.4fr) minmax(260px, 1fr);
+  gap: 16px;
+  align-items: flex-start;
+  padding: 16px 18px;
+  border-radius: 18px;
+  border: 1px solid rgba(95, 119, 165, 0.14);
+  background: rgba(255, 255, 255, 0.6);
+}
+
+.project-group-row--current {
+  border-color: rgba(194, 81, 0, 0.24);
+  box-shadow: inset 0 0 0 1px rgba(194, 81, 0, 0.08);
+}
+
+.project-group-row-meta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.project-group-row-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.project-group-row-name {
+  font-weight: 600;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.project-group-row-note {
+  color: rgba(54, 65, 82, 0.78);
+  font-size: 0.88rem;
+  line-height: 1.6;
+  word-break: break-word;
+}
+
+.project-group-worklogs {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.project-group-log-card {
+  border-radius: 18px;
+  border: 1px solid rgba(95, 119, 165, 0.14);
+  background: rgba(255, 255, 255, 0.52);
+  overflow: hidden;
+}
+
+.project-group-log-summary {
+  list-style: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 18px;
+  cursor: pointer;
+}
+
+.project-group-log-summary::-webkit-details-marker {
+  display: none;
+}
+
+.project-group-log-title {
+  font-weight: 600;
+  line-height: 1.5;
+  word-break: break-word;
+}
+
 .filter-bar {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1103,6 +1258,8 @@ input[type='file'] {
   border-bottom: 1px solid rgba(95, 119, 165, 0.08);
   color: rgba(17, 24, 39, 0.92);
   font-size: 0.88rem;
+  vertical-align: top;
+  word-break: break-word;
 }
 
 .data-table tbody tr {
@@ -1580,5 +1737,13 @@ input[type='file'] {
   .price-editor-head,
   .price-editor-row {
     grid-template-columns: 1fr;
+  }
+
+  .project-group-toolbar,
+  .project-group-row,
+  .project-group-log-summary {
+    grid-template-columns: 1fr;
+    flex-direction: column;
+    align-items: stretch;
   }
 }

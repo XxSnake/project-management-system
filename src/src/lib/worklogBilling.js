@@ -1,3 +1,5 @@
+import { isNonBillableLayoutWork } from '@/lib/worklogClassification';
+
 export function normalizePricingMode(value) {
     if (value === 'area' || value === 'mixed' || value === 'lumpsum') return value;
     return 'unit';
@@ -49,6 +51,7 @@ export function getWorklogStaff(log) {
  *   exceeded            产值超限（累计超过合同100%）
  *   workload-only       仅记工作量（未签合同且无手动产值）
  *   no-contract-manual  未签合同手工产值
+ *   non-billable-layout 布点/布设，仅记工作量
  *   unmatched           未匹配单价
  */
 export function getWorklogBillingState(log) {
@@ -59,6 +62,14 @@ export function getWorklogBillingState(log) {
     const hasShare = normalizeAllocationShare(log?.allocationShare) !== null;
     const calculationMode = log?.productionValues?.[0]?.calculationMode || null;
     const isExceeded = (log?.productionValues || []).some((pv) => pv.exceeded);
+
+    if (isNonBillableLayoutWork(log)) {
+        return {
+            code: 'non-billable-layout',
+            label: '布点不计产值',
+            tone: 'pending',
+        };
+    }
 
     // 超限状态（优先级最高，但仍有产值记录）
     if (isExceeded) {

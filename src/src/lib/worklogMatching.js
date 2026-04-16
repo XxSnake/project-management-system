@@ -6,11 +6,53 @@ const LOCAL_AUTO_MATCH_THRESHOLD = 0.96;
 const LOCAL_FALLBACK_THRESHOLD = 0.78;
 const MODEL_MATCH_THRESHOLD = 0.72;
 const MAX_MODEL_CANDIDATES = 12;
+const UNIT_COMPATIBILITY_GROUPS = new Map([
+    ['m²', 'area'],
+    ['㎡', 'area'],
+    ['m2', 'area'],
+    ['平方米', 'area'],
+    ['吨', 'mass'],
+    ['t', 'mass'],
+    ['项', 'item'],
+    ['次', 'item'],
+    ['点', 'point'],
+    ['根', 'root'],
+    ['个构件', 'component'],
+    ['构件', 'component'],
+    ['个', 'component'],
+    ['米', 'length'],
+    ['m', 'length'],
+    ['组', 'group'],
+    ['栋', 'group'],
+]);
 
 // 从标准检测项目列表自动生成别名组
 const ALIAS_GROUPS = STANDARD_TEST_ITEMS
     .filter((item) => item.aliases && item.aliases.length > 0)
     .map((item) => [item.name, ...item.aliases]);
+
+const CONTRACT_BUNDLE_ALIASES = [
+    {
+        pattern: /桩身完整性检测/u,
+        aliases: ['低应变', '低应变法', '小应变', '完整性检测'],
+    },
+    {
+        pattern: /混凝土强度/u,
+        aliases: ['实体检测', '混凝土强度', '混凝土(综合法）', '混凝土（综合法）', '保护层', '钢筋保护层', '板厚', '层高', '净高', '结构尺寸'],
+    },
+    {
+        pattern: /后置埋件锚固承载力/u,
+        aliases: ['植筋拉拔', '植筋', '后置埋件拉拔', '后置埋件现场拉拔力', '拉拔'],
+    },
+    {
+        pattern: /竖向变形观测/u,
+        aliases: ['沉降', '沉降观测', '周边道路竖向', '道路竖向', '周边竖向'],
+    },
+    {
+        pattern: /基坑监测/u,
+        aliases: ['基坑监测', '基坑竖向', '基坑水平', '水平', '水平位移'],
+    },
+];
 
 function clampScore(score) {
     return Math.max(0, Math.min(1, score));
@@ -20,6 +62,46 @@ function normalizeText(text) {
     return String(text || '')
         .toLowerCase()
         .replace(/[\s()（）\[\]【】\-_/\\,，。:：;；]/gu, '');
+}
+
+export function normalizeUnitForMatching(unit) {
+    return String(unit || '')
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/gu, '')
+        .replace(/㎡/gu, 'm²')
+        .replace(/m2/gu, 'm²')
+        .replace(/平方米/gu, 'm²');
+}
+
+function resolveUnitCompatibilityGroup(unit) {
+    const normalized = normalizeUnitForMatching(unit);
+    if (!normalized) {
+        return null;
+    }
+
+    return UNIT_COMPATIBILITY_GROUPS.get(normalized) || null;
+}
+
+export function areUnitsCompatibleForMatching(workLogUnit, candidateUnit) {
+    const normalizedWorkLogUnit = normalizeUnitForMatching(workLogUnit);
+    const normalizedCandidateUnit = normalizeUnitForMatching(candidateUnit);
+
+    if (!normalizedWorkLogUnit && !normalizedCandidateUnit) {
+        return true;
+    }
+
+    if (!normalizedWorkLogUnit || !normalizedCandidateUnit) {
+        return false;
+    }
+
+    if (normalizedWorkLogUnit === normalizedCandidateUnit) {
+        return true;
+    }
+
+    const workLogGroup = resolveUnitCompatibilityGroup(normalizedWorkLogUnit);
+    const candidateGroup = resolveUnitCompatibilityGroup(normalizedCandidateUnit);
+    return Boolean(workLogGroup && candidateGroup && workLogGroup === candidateGroup);
 }
 
 function buildVariants(text) {
@@ -36,6 +118,26 @@ function buildVariants(text) {
             normalizedGroup.forEach((replacement) => {
                 variants.add(normalized.replace(current, replacement));
             });
+        });
+    });
+
+    return Array.from(variants).filter(Boolean);
+}
+
+function buildCandidateVariants(text) {
+    const variants = new Set(buildVariants(text));
+    const rawText = String(text || '');
+
+    CONTRACT_BUNDLE_ALIASES.forEach((rule) => {
+        if (!rule.pattern.test(rawText)) {
+            return;
+        }
+
+        rule.aliases.forEach((alias) => {
+            const normalizedAlias = normalizeText(alias);
+            if (normalizedAlias) {
+                variants.add(normalizedAlias);
+            }
         });
     });
 
@@ -89,7 +191,7 @@ function diceCoefficient(left, right) {
 
 function scoreNameAgainstCandidate(worklogName, candidateName) {
     const worklogVariants = buildVariants(worklogName);
-    const candidateVariants = buildVariants(candidateName);
+    const candidateVariants = buildCandidateVariants(candidateName);
     let bestScore = 0;
 
     worklogVariants.forEach((worklogVariant) => {
@@ -110,8 +212,8 @@ function scoreCandidate(workLog, candidate) {
 
     let score = Math.max(nameScore, contextScore * 0.92);
 
-    if (workLog.unit && candidate.unit) {
-        score += normalizeText(workLog.unit) === normalizeText(candidate.unit) ? 0.03 : -0.02;
+    if (workLog.unit || candidate.unit) {
+        score += areUnitsCompatibleForMatching(workLog.unit, candidate.unit) ? 0.03 : -0.02;
     }
 
     if (candidate.source === 'contract') {
@@ -286,8 +388,15 @@ export async function matchPriceCandidateFromList(workLog, candidates, projectNa
     const effectiveWorkLog = standardMatch
         ? { ...workLog, testContent: effectiveTestContent }
         : workLog;
+    const compatibleCandidates = candidates.filter((candidate) => (
+        areUnitsCompatibleForMatching(effectiveWorkLog.unit, candidate.unit)
+    ));
 
-    const rankedCandidates = candidates
+    if (compatibleCandidates.length === 0) {
+        return null;
+    }
+
+    const rankedCandidates = compatibleCandidates
         .map((candidate) => ({
             ...candidate,
             score: scoreCandidate(effectiveWorkLog, candidate),

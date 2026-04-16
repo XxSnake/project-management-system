@@ -6,8 +6,13 @@ import { useRouter } from 'next/navigation';
 import {
     allocationShareToPercent,
     getWorklogBillingState,
+    normalizePricingMode,
     sumProductionValues,
 } from '@/lib/worklogBilling';
+import {
+    buildProjectDisplayName,
+    buildWorkLogProjectDisplayName,
+} from '@/lib/projectDisplayName';
 
 function formatCurrency(value) {
     return `CNY ${Number(value || 0).toFixed(2)}`;
@@ -17,10 +22,37 @@ function formatNumber(value) {
     return Number(value || 0).toFixed(2).replace(/\.?0+$/u, '');
 }
 
+function formatDateInput(value) {
+    if (!value) {
+        return '';
+    }
+
+    return new Date(value).toISOString().slice(0, 10);
+}
+
+function normalizeTextInput(value) {
+    return String(value ?? '').trim();
+}
+
 function getStaffNames(log) {
     return (log.staffMembers || [])
         .map((item) => item.staff?.name)
         .filter(Boolean);
+}
+
+function parseStaffInput(value) {
+    return normalizeTextInput(value)
+        .split(/[,，、\s]+/u)
+        .map((item) => item.trim())
+        .filter(Boolean);
+}
+
+function sameStringArray(left, right) {
+    if (left.length !== right.length) {
+        return false;
+    }
+
+    return left.every((item, index) => item === right[index]);
 }
 
 function getStatusClass(tone) {
@@ -37,19 +69,71 @@ function buildAllocationItemFromLog(log) {
         contractId: contract?.id || null,
         contractNo: contract?.contractNo || '',
         projectId: log.project?.id || null,
-        projectName: log.project?.name || '',
+        projectName: buildWorkLogProjectDisplayName(log, { warnOnConflict: true }),
         workDate: log.workDate,
         testContent: log.testContent,
         quantity: Number(log.quantity || 0),
         unit: log.unit || '',
         remarks: log.remarks || '',
         allocationShare: log.allocationShare,
-        contractAmount: Number(contract?.areaPricingAmount || 0),
+        contractAmount: Number(contract?.areaPricingAmount || contract?.lumpSumAmount || 0),
         contractArea: contract?.areaPricingArea === null || contract?.areaPricingArea === undefined
             ? null
             : Number(contract.areaPricingArea),
         staffNames: getStaffNames(log),
     };
+}
+
+function buildEditingState(log) {
+    const staffNames = getStaffNames(log);
+
+    return {
+        ...log,
+        workDate: formatDateInput(log.workDate),
+        projectName: buildWorkLogProjectDisplayName(log, { warnOnConflict: true }),
+        staffNames,
+        productionMode: log.productionValues?.some((item) => item.calculationMode === 'manual') || Number(log.manualTotalValue || 0) > 0 ? 'manual' : 'auto',
+        manualTotalValue: log.manualTotalValue ?? '',
+        manualValueNote: log.manualValueNote || '',
+    };
+}
+
+function buildSplitState(log) {
+    return {
+        id: log.id,
+        originalQuantity: Number(log.quantity || 0),
+        splitQuantity: '',
+        workDate: formatDateInput(log.workDate),
+        projectName: buildWorkLogProjectDisplayName(log, { warnOnConflict: true }),
+        testContent: log.testContent || '',
+        unit: log.unit || '',
+        remarks: log.remarks || '',
+        staffNames: getStaffNames(log),
+        allocationShare: log.allocationShare,
+        manualTotalValue: log.manualTotalValue ?? '',
+    };
+}
+
+function supportsAllocationShare(log) {
+    const pricingMode = normalizePricingMode(log?.project?.contract?.pricingMode);
+    return pricingMode === 'area' || pricingMode === 'lumpsum';
+}
+
+function handleBlurOnEnter(event) {
+    if (event.key === 'Enter') {
+        event.preventDefault();
+        event.currentTarget.blur();
+    }
+}
+
+function resizeTextarea(target) {
+    if (!target) {
+        return;
+    }
+
+    const element = target;
+    element.style.height = '0px';
+    element.style.height = `${element.scrollHeight}px`;
 }
 
 export default function WorkLogPage() {
@@ -62,8 +146,12 @@ export default function WorkLogPage() {
     const [parsingText, setParsingText] = useState(false);
     const [uploadingFile, setUploadingFile] = useState(false);
     const [selectedFile, setSelectedFile] = useState(null);
+    const [editorVersion, setEditorVersion] = useState(0);
     const [editingLog, setEditingLog] = useState(null);
     const [savingEdit, setSavingEdit] = useState(false);
+    const [savingQuickEditId, setSavingQuickEditId] = useState(null);
+    const [splittingLog, setSplittingLog] = useState(null);
+    const [submittingSplit, setSubmittingSplit] = useState(false);
     const [deletingBatch, setDeletingBatch] = useState(false);
     const [allocationQueue, setAllocationQueue] = useState([]);
     const [activeAllocation, setActiveAllocation] = useState(null);
@@ -80,6 +168,7 @@ export default function WorkLogPage() {
         const response = await fetch(`/api/worklog?_t=${Date.now()}`, { cache: 'no-store' });
         const data = await response.json();
         setLogs(Array.isArray(data) ? data : []);
+        setEditorVersion((current) => current + 1);
         setSelectedIds((current) => current.filter((id) => data.some((log) => log.id === id)));
     };
 
@@ -91,6 +180,7 @@ export default function WorkLogPage() {
             .then((data) => {
                 if (!cancelled) {
                     setLogs(Array.isArray(data) ? data : []);
+                    setEditorVersion((current) => current + 1);
                 }
             })
             .catch((error) => {
@@ -213,7 +303,7 @@ export default function WorkLogPage() {
 
         const params = new URLSearchParams({
             projectId: String(project.id),
-            projectName: project.name || '',
+            projectName: buildProjectDisplayName(project),
         });
 
         router.push(`/contracts?${params.toString()}`);
@@ -236,7 +326,110 @@ export default function WorkLogPage() {
         setSelectedIds(availableLogs.map((log) => log.id));
     };
 
-    const handleSaveEdit = async () => {
+    const saveWorkLogPatch = async (logId, payload, options = {}) => {
+        const { queuePending = false } = options;
+
+        setSavingQuickEditId(logId);
+        try {
+            const response = await fetch(`/api/worklog/${logId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload),
+            });
+            const data = await response.json();
+
+            if (!response.ok) {
+                throw new Error(data.error || '保存失败');
+            }
+
+            await refreshLogs();
+            if (queuePending && data.pendingAllocation) {
+                queuePendingAllocations([data.pendingAllocation]);
+            }
+            return data;
+        } catch (error) {
+            alert(`保存失败：${error.message}`);
+            return null;
+        } finally {
+            setSavingQuickEditId(null);
+        }
+    };
+
+    const handleQuickSaveText = async (log, key, value, originalValue) => {
+        const nextValue = normalizeTextInput(value);
+        const currentValue = normalizeTextInput(originalValue);
+        if (nextValue === currentValue) {
+            return;
+        }
+
+        await saveWorkLogPatch(log.id, { [key]: nextValue });
+    };
+
+    const handleQuickSaveDate = async (log, value) => {
+        const nextValue = value || '';
+        if (nextValue === formatDateInput(log.workDate)) {
+            return;
+        }
+
+        await saveWorkLogPatch(log.id, { workDate: nextValue });
+    };
+
+    const handleQuickSaveQuantity = async (log, value) => {
+        const nextValue = normalizeTextInput(value);
+        const currentValue = formatNumber(log.quantity);
+
+        if (nextValue === currentValue) {
+            return;
+        }
+
+        if (nextValue === '') {
+            await saveWorkLogPatch(log.id, { quantity: '' });
+            return;
+        }
+
+        if (!/^(?:\d+|\d*\.\d+)$/u.test(nextValue)) {
+            alert('数量请填写数字');
+            await refreshLogs();
+            return;
+        }
+
+        await saveWorkLogPatch(log.id, { quantity: nextValue });
+    };
+
+    const handleQuickSaveStaff = async (log, value) => {
+        const nextStaffNames = parseStaffInput(value);
+        const currentStaffNames = getStaffNames(log);
+
+        if (sameStringArray(nextStaffNames, currentStaffNames)) {
+            return;
+        }
+
+        await saveWorkLogPatch(log.id, { staffNames: nextStaffNames });
+    };
+
+    const handleQuickSaveAllocationShare = async (log, value) => {
+        const nextValue = normalizeTextInput(value);
+        const currentValue = allocationShareToPercent(log.allocationShare);
+        if (nextValue === currentValue) {
+            return;
+        }
+
+        if (nextValue === '') {
+            await saveWorkLogPatch(log.id, { allocationShare: '' });
+            return;
+        }
+
+        const numericPercent = Number.parseFloat(nextValue);
+        if (!Number.isFinite(numericPercent) || numericPercent <= 0 || numericPercent > 100) {
+            alert('占比请填写 0 到 100 之间的数字');
+            await refreshLogs();
+            return;
+        }
+
+        await saveWorkLogPatch(log.id, { allocationShare: numericPercent });
+    };
+
+    const handleSaveEditLegacy = async () => {
         setSavingEdit(true);
         try {
             const response = await fetch(`/api/worklog/${editingLog.id}`, {
@@ -263,6 +456,37 @@ export default function WorkLogPage() {
             setEditingLog(null);
             await refreshLogs();
             queuePendingAllocations(data.pendingAllocation ? [data.pendingAllocation] : []);
+        } catch (error) {
+            alert(`保存失败：${error.message}`);
+        } finally {
+            setSavingEdit(false);
+        }
+    };
+
+    void handleSaveEditLegacy;
+
+    const handleSaveEdit = async () => {
+        setSavingEdit(true);
+        try {
+            const data = await saveWorkLogPatch(
+                editingLog.id,
+                {
+                    workDate: editingLog.workDate,
+                    projectName: editingLog.projectName,
+                    testContent: editingLog.testContent,
+                    quantity: editingLog.quantity,
+                    unit: editingLog.unit,
+                    remarks: editingLog.remarks,
+                    staffNames: editingLog.staffNames,
+                    manualTotalValue: editingLog.productionMode === 'manual' ? editingLog.manualTotalValue : '',
+                    manualValueNote: editingLog.productionMode === 'manual' ? editingLog.manualValueNote : '',
+                },
+                { queuePending: true },
+            );
+
+            if (data) {
+                setEditingLog(null);
+            }
         } catch (error) {
             alert(`保存失败：${error.message}`);
         } finally {
@@ -319,6 +543,57 @@ export default function WorkLogPage() {
         }
     };
 
+    const handleOpenSplit = (log) => {
+        if (Number(log.quantity || 0) <= 0) {
+            alert('这条记录的数量不能拆分，请先把数量改成大于 0');
+            return;
+        }
+
+        setSplittingLog(buildSplitState(log));
+    };
+
+    const handleSubmitSplit = async () => {
+        if (!splittingLog) {
+            return;
+        }
+
+        const totalQuantity = Number(splittingLog.originalQuantity || 0);
+        const splitQuantity = Number.parseFloat(splittingLog.splitQuantity);
+        if (!Number.isFinite(splitQuantity) || splitQuantity <= 0 || splitQuantity >= totalQuantity) {
+            alert('拆出数量必须大于 0，并且小于原数量');
+            return;
+        }
+
+        setSubmittingSplit(true);
+        try {
+            const response = await fetch(`/api/worklog/${splittingLog.id}/split`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    splitQuantity,
+                    workDate: splittingLog.workDate,
+                    projectName: splittingLog.projectName,
+                    testContent: splittingLog.testContent,
+                    unit: splittingLog.unit,
+                    remarks: splittingLog.remarks,
+                    staffNames: splittingLog.staffNames,
+                }),
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || '拆分失败');
+            }
+
+            setSplittingLog(null);
+            await refreshLogs();
+            queuePendingAllocations(data.pendingAllocations);
+        } catch (error) {
+            alert(`拆分失败：${error.message}`);
+        } finally {
+            setSubmittingSplit(false);
+        }
+    };
+
     const handleSubmitAllocation = async () => {
         if (!activeAllocation) {
             return;
@@ -360,7 +635,7 @@ export default function WorkLogPage() {
     };
 
     const projectOptions = useMemo(() => Array.from(
-        new Set(logs.map((log) => log.project?.name).filter(Boolean)),
+        new Set(logs.map((log) => buildProjectDisplayName(log.project)).filter(Boolean)),
     ).sort((a, b) => a.localeCompare(b, 'zh-CN')), [logs]);
 
     const staffOptions = useMemo(() => Array.from(
@@ -368,11 +643,12 @@ export default function WorkLogPage() {
     ).sort((a, b) => a.localeCompare(b, 'zh-CN')), [logs]);
 
     const filteredLogs = useMemo(() => logs.filter((log) => {
-        const projectName = log.project?.name || '';
+        const projectName = buildProjectDisplayName(log.project);
+        const displayProjectName = buildWorkLogProjectDisplayName(log, { warnOnConflict: true });
         const staffNames = getStaffNames(log).join('、');
         const workDate = new Date(log.workDate).toISOString().slice(0, 10);
         const totalValue = sumProductionValues(log);
-        const haystack = `${projectName} ${log.testContent} ${staffNames} ${log.remarks || ''} ${totalValue}`.toLowerCase();
+        const haystack = `${projectName} ${displayProjectName} ${log.testContent} ${staffNames} ${log.remarks || ''} ${log.buildingName || ''} ${totalValue}`.toLowerCase();
 
         if (filters.project && projectName !== filters.project) {
             return false;
@@ -627,6 +903,220 @@ export default function WorkLogPage() {
                                     </th>
                                     <th>日期</th>
                                     <th>项目</th>
+                                    <th>检测内容 / 备注 / 占比</th>
+                                    <th>数量 / 单位</th>
+                                    <th>人员</th>
+                                    <th>状态</th>
+                                    <th className="text-right">产值</th>
+                                    <th>操作</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {loading ? (
+                                    Array.from({ length: 8 }).map((_, index) => (
+                                        <tr key={`editable-skeleton-${index}`}>
+                                            <td colSpan="9">
+                                                <div className="progress-strip">
+                                                    <div className="progress-value" style={{ width: `${36 + index * 8}%` }} />
+                                                </div>
+                                            </td>
+                                        </tr>
+                                    ))
+                                ) : filteredLogs.length === 0 ? (
+                                    <tr>
+                                        <td colSpan="9">
+                                            <div className="empty-state">
+                                                <div>
+                                                    <div className="empty-dot" />
+                                                    <strong>暂无工作记录</strong>
+                                                    当前筛选条件下没有可编辑的记录。
+                                                </div>
+                                            </div>
+                                        </td>
+                                    </tr>
+                                ) : (
+                                    filteredLogs.map((log) => {
+                                        const totalValue = sumProductionValues(log);
+                                        const isSelected = selectedIds.includes(log.id);
+                                        const staffNames = getStaffNames(log);
+                                        const status = getWorklogBillingState(log);
+
+                                        return (
+                                            <tr key={`editable-${log.id}`} style={isSelected ? { background: 'rgba(64, 160, 255, 0.08)' } : undefined}>
+                                                <td>
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={isSelected}
+                                                        onChange={() => handleToggleSelect(log.id)}
+                                                        aria-label={`选择工作记录 ${log.id}`}
+                                                    />
+                                                </td>
+                                                <td>
+                                                    <input
+                                                        key={`date-${editorVersion}-${log.id}`}
+                                                        type="date"
+                                                        className="inline-edit-input"
+                                                        defaultValue={formatDateInput(log.workDate)}
+                                                        onKeyDown={handleBlurOnEnter}
+                                                        onBlur={(event) => void handleQuickSaveDate(log, event.target.value)}
+                                                    />
+                                                </td>
+                                                <td>
+                                                    <textarea
+                                                        key={`project-${editorVersion}-${log.id}`}
+                                                        className="inline-edit-input inline-edit-textarea"
+                                                        defaultValue={buildWorkLogProjectDisplayName(log, { warnOnConflict: true })}
+                                                        rows={1}
+                                                        placeholder="项目名"
+                                                        ref={resizeTextarea}
+                                                        onInput={(event) => resizeTextarea(event.currentTarget)}
+                                                        onBlur={(event) => void handleQuickSaveText(log, 'projectName', event.target.value, buildWorkLogProjectDisplayName(log, { warnOnConflict: true }))}
+                                                    />
+                                                </td>
+                                                <td>
+                                                    <div className="inline-edit-stack">
+                                                        <textarea
+                                                            key={`content-${editorVersion}-${log.id}`}
+                                                            className="inline-edit-input inline-edit-textarea"
+                                                            defaultValue={log.testContent || ''}
+                                                            rows={1}
+                                                            placeholder="检测内容"
+                                                            ref={resizeTextarea}
+                                                            onInput={(event) => resizeTextarea(event.currentTarget)}
+                                                            onBlur={(event) => void handleQuickSaveText(log, 'testContent', event.target.value, log.testContent)}
+                                                        />
+                                                        <textarea
+                                                            key={`remarks-${editorVersion}-${log.id}`}
+                                                            className="inline-edit-input inline-edit-input--muted inline-edit-textarea"
+                                                            defaultValue={log.remarks || ''}
+                                                            rows={1}
+                                                            placeholder="备注"
+                                                            ref={resizeTextarea}
+                                                            onInput={(event) => resizeTextarea(event.currentTarget)}
+                                                            onBlur={(event) => void handleQuickSaveText(log, 'remarks', event.target.value, log.remarks)}
+                                                        />
+                                                        {supportsAllocationShare(log) && (
+                                                            <div className="inline-edit-inline">
+                                                                <input
+                                                                    key={`share-${editorVersion}-${log.id}`}
+                                                                    type="number"
+                                                                    step="0.01"
+                                                                    className="inline-edit-input"
+                                                                    defaultValue={allocationShareToPercent(log.allocationShare)}
+                                                                    placeholder="占比%"
+                                                                    onKeyDown={handleBlurOnEnter}
+                                                                    onBlur={(event) => void handleQuickSaveAllocationShare(log, event.target.value)}
+                                                                />
+                                                                <span className="inline-edit-hint">占比 %</span>
+                                                            </div>
+                                                        )}
+                                                    </div>
+                                                </td>
+                                                <td>
+                                                    <div className="inline-edit-inline">
+                                                        <input
+                                                            key={`quantity-${editorVersion}-${log.id}`}
+                                                            type="number"
+                                                            step="0.01"
+                                                            className="inline-edit-input"
+                                                            defaultValue={formatNumber(log.quantity)}
+                                                            placeholder="数量"
+                                                            onKeyDown={handleBlurOnEnter}
+                                                            onBlur={(event) => void handleQuickSaveQuantity(log, event.target.value)}
+                                                        />
+                                                        <input
+                                                            key={`unit-${editorVersion}-${log.id}`}
+                                                            type="text"
+                                                            className="inline-edit-input"
+                                                            defaultValue={log.unit || ''}
+                                                            placeholder="单位"
+                                                            onKeyDown={handleBlurOnEnter}
+                                                            onBlur={(event) => void handleQuickSaveText(log, 'unit', event.target.value, log.unit)}
+                                                        />
+                                                    </div>
+                                                </td>
+                                                <td>
+                                                    <div className="inline-edit-stack">
+                                                        <textarea
+                                                            key={`staff-${editorVersion}-${log.id}`}
+                                                            className="inline-edit-input inline-edit-textarea"
+                                                            defaultValue={staffNames.join('、')}
+                                                            rows={1}
+                                                            placeholder="人员，多个用顿号/空格分隔"
+                                                            ref={resizeTextarea}
+                                                            onInput={(event) => resizeTextarea(event.currentTarget)}
+                                                            onBlur={(event) => void handleQuickSaveStaff(log, event.target.value)}
+                                                        />
+                                                        <div className="inline-edit-hint">多个名字可用空格、逗号或顿号分开</div>
+                                                    </div>
+                                                </td>
+                                                <td>
+                                                    <span className={`status-badge ${getStatusClass(status.tone)}`}>{status.label}</span>
+                                                    {savingQuickEditId === log.id && (
+                                                        <div className="inline-edit-hint" style={{ marginTop: 8 }}>保存中...</div>
+                                                    )}
+                                                </td>
+                                                <td className="text-right">
+                                                    <span className="value-text">{formatCurrency(totalValue)}</span>
+                                                    {log.manualValueNote && <div className="feed-item-meta">{log.manualValueNote}</div>}
+                                                    {status.code === 'exceeded' && log.productionValues?.[0]?.originalValue > 0 && (
+                                                        <div className="feed-item-meta" style={{ color: 'var(--color-danger, #ef4444)' }}>
+                                                            原值 {formatCurrency(log.productionValues.reduce((sum, item) => sum + (item.originalValue || 0), 0))}
+                                                        </div>
+                                                    )}
+                                                </td>
+                                                <td>
+                                                    <div className="chip-row">
+                                                        {status.code === 'pending-area-share' && (
+                                                            <button
+                                                                className="btn btn-primary"
+                                                                onClick={() => {
+                                                                    const item = buildAllocationItemFromLog(log);
+                                                                    setActiveAllocation(item);
+                                                                    setAllocationPercent(allocationShareToPercent(item.allocationShare));
+                                                                }}
+                                                            >
+                                                                占比卡片
+                                                            </button>
+                                                        )}
+                                                        <button
+                                                            className="btn btn-secondary"
+                                                            onClick={() => setEditingLog(buildEditingState(log))}
+                                                        >
+                                                            更多
+                                                        </button>
+                                                        <button
+                                                            className="btn btn-secondary"
+                                                            onClick={() => handleOpenSplit(log)}
+                                                            disabled={Number(log.quantity || 0) <= 0}
+                                                        >
+                                                            拆分
+                                                        </button>
+                                                        <button className="btn btn-danger" onClick={() => handleDelete(log.id)}>删除</button>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        );
+                                    })
+                                )}
+                            </tbody>
+                        </table>
+                    </div>
+
+                    <div className="data-table-shell" style={{ display: 'none' }}>
+                        <table className="data-table">
+                            <thead>
+                                <tr>
+                                    <th style={{ width: '50px' }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={allSelected}
+                                            onChange={() => handleToggleSelectAll(filteredLogs)}
+                                            aria-label="全选可见工作记录"
+                                        />
+                                    </th>
+                                    <th>日期</th>
+                                    <th>项目</th>
                                     <th>检测内容</th>
                                     <th>数量</th>
                                     <th>人员</th>
@@ -676,7 +1166,7 @@ export default function WorkLogPage() {
                                                     />
                                                 </td>
                                                 <td>{new Date(log.workDate).toLocaleDateString('zh-CN')}</td>
-                                                <td>{log.project?.name || '未绑定项目'}</td>
+                                                <td>{buildWorkLogProjectDisplayName(log, { warnOnConflict: true }) || '未绑定项目'}</td>
                                                 <td>
                                                     <div>{log.testContent}</div>
                                                     <div className="feed-item-meta">
@@ -721,15 +1211,7 @@ export default function WorkLogPage() {
                                                         )}
                                                         <button
                                                             className="btn btn-secondary"
-                                                            onClick={() => setEditingLog({
-                                                                ...log,
-                                                                workDate: new Date(log.workDate).toISOString().slice(0, 10),
-                                                                projectName: log.project?.name || '',
-                                                                staffNames,
-                                                                productionMode: log.productionValues?.some((item) => item.calculationMode === 'manual') || Number(log.manualTotalValue || 0) > 0 ? 'manual' : 'auto',
-                                                                manualTotalValue: log.manualTotalValue ?? '',
-                                                                manualValueNote: log.manualValueNote || '',
-                                                            })}
+                                                            onClick={() => setEditingLog(buildEditingState(log))}
                                                         >
                                                             编辑
                                                         </button>
@@ -745,6 +1227,116 @@ export default function WorkLogPage() {
                     </div>
                 </section>
             </div>
+
+            {splittingLog && (
+                <div className="modal-backdrop" onClick={() => setSplittingLog(null)}>
+                    <div className="modal-card" onClick={(event) => event.stopPropagation()}>
+                        <div className="modal-header">
+                            <div>
+                                <div className="page-kicker">Worklog Split</div>
+                                <div className="modal-title">拆分工作记录</div>
+                                <div className="modal-note">系统会保留原记录，把你填写的数量拆成一条新记录。拆分后如果原来有占比或手工产值，需要重新确认。</div>
+                            </div>
+                            <button className="btn btn-secondary" onClick={() => setSplittingLog(null)}>关闭</button>
+                        </div>
+
+                        <div className="split-grid">
+                            <div className="surface-item">
+                                <div className="surface-title">原数量</div>
+                                <div className="surface-note">{formatNumber(splittingLog.originalQuantity)} {splittingLog.unit || ''}</div>
+                            </div>
+                            <div className="surface-item">
+                                <div className="surface-title">拆分后原记录剩余</div>
+                                <div className="surface-note">
+                                    {Number.isFinite(Number.parseFloat(splittingLog.splitQuantity))
+                                        ? `${formatNumber(Math.max(Number(splittingLog.originalQuantity || 0) - Number.parseFloat(splittingLog.splitQuantity || 0), 0))} ${splittingLog.unit || ''}`
+                                        : '-'}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="form-grid mt-4">
+                            <div className="form-group">
+                                <label htmlFor="split-quantity">拆出数量</label>
+                                <input
+                                    id="split-quantity"
+                                    type="number"
+                                    step="0.01"
+                                    className="form-input"
+                                    value={splittingLog.splitQuantity}
+                                    onChange={(event) => setSplittingLog((current) => ({ ...current, splitQuantity: event.target.value }))}
+                                />
+                            </div>
+                            <div className="form-group">
+                                <label htmlFor="split-unit">新记录单位</label>
+                                <input
+                                    id="split-unit"
+                                    className="form-input"
+                                    value={splittingLog.unit}
+                                    onChange={(event) => setSplittingLog((current) => ({ ...current, unit: event.target.value }))}
+                                />
+                            </div>
+                            <div className="form-group">
+                                <label htmlFor="split-date">新记录日期</label>
+                                <input
+                                    id="split-date"
+                                    type="date"
+                                    className="form-input"
+                                    value={splittingLog.workDate}
+                                    onChange={(event) => setSplittingLog((current) => ({ ...current, workDate: event.target.value }))}
+                                />
+                            </div>
+                            <div className="form-group">
+                                <label htmlFor="split-project">新记录项目</label>
+                                <input
+                                    id="split-project"
+                                    className="form-input"
+                                    value={splittingLog.projectName}
+                                    onChange={(event) => setSplittingLog((current) => ({ ...current, projectName: event.target.value }))}
+                                />
+                            </div>
+                            <div className="form-group">
+                                <label htmlFor="split-content">新记录检测内容</label>
+                                <input
+                                    id="split-content"
+                                    className="form-input"
+                                    value={splittingLog.testContent}
+                                    onChange={(event) => setSplittingLog((current) => ({ ...current, testContent: event.target.value }))}
+                                />
+                            </div>
+                            <div className="form-group">
+                                <label htmlFor="split-staff">新记录人员</label>
+                                <input
+                                    id="split-staff"
+                                    className="form-input"
+                                    value={splittingLog.staffNames.join('、')}
+                                    onChange={(event) => setSplittingLog((current) => ({
+                                        ...current,
+                                        staffNames: parseStaffInput(event.target.value),
+                                    }))}
+                                />
+                            </div>
+                        </div>
+
+                        <div className="form-group mt-4">
+                            <label htmlFor="split-remarks">新记录备注</label>
+                            <textarea
+                                id="split-remarks"
+                                className="form-textarea"
+                                value={splittingLog.remarks}
+                                onChange={(event) => setSplittingLog((current) => ({ ...current, remarks: event.target.value }))}
+                            />
+                        </div>
+
+                        <div className="modal-actions">
+                            <button className="btn btn-secondary" onClick={() => setSplittingLog(null)}>取消</button>
+                            <button className="btn btn-primary" onClick={handleSubmitSplit} disabled={submittingSplit}>
+                                {submittingSplit ? '拆分中...' : '确认拆分'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {editingLog && (
                 <div className="modal-backdrop" onClick={() => setEditingLog(null)}>

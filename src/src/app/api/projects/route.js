@@ -1,6 +1,19 @@
 import prisma from '@/lib/prisma';
+import { buildProjectDisplayName } from '@/lib/projectDisplayName';
 import { retroactiveCalculation } from '@/lib/productionCalculator';
+import {
+    isLikelyCorruptedProjectName,
+    resolveProjectNameRepairCandidate,
+} from '@/lib/projectNameRepair';
 import { NextResponse } from 'next/server';
+
+function normalizeBuildingMode(value, fallback = false) {
+    if (value === undefined) {
+        return fallback;
+    }
+
+    return value === true || value === 'true' || value === 1 || value === '1';
+}
 
 export async function GET() {
     const projects = await prisma.project.findMany({
@@ -17,17 +30,28 @@ export async function POST(request) {
     if (!data.name || !String(data.name).trim()) {
         return NextResponse.json({ error: '项目名称不能为空' }, { status: 400 });
     }
+
     const trimmedName = String(data.name).trim();
-    const duplicate = await prisma.project.findFirst({ where: { name: trimmedName } });
+    const trimmedPhase = data.phase ? String(data.phase).trim() : null;
+    const buildingMode = normalizeBuildingMode(data.buildingMode);
+    // Removed phase check for buildingMode
+
+    const duplicate = await prisma.project.findFirst({
+        where: {
+            name: trimmedName,
+            phase: trimmedPhase,
+        },
+    });
     if (duplicate) {
-        return NextResponse.json({ error: `已存在同名项目：${trimmedName}` }, { status: 409 });
+        return NextResponse.json({ error: `已存在同名项目：${buildProjectDisplayName(trimmedName, trimmedPhase)}` }, { status: 409 });
     }
 
     const project = await prisma.project.create({
         data: {
             name: trimmedName,
             status: data.status || '进行中',
-            phase: data.phase || null,
+            phase: trimmedPhase,
+            buildingMode,
             contractId: data.contractId || null,
         },
     });
@@ -43,24 +67,68 @@ export async function PUT(request) {
     }
 
     const projectId = Number(data.id);
-
-    // 检查是否是新关联合同（之前没有合同，现在有了）
     const oldProject = await prisma.project.findUnique({
         where: { id: projectId },
-        select: { contractId: true },
+        select: {
+            name: true,
+            contractId: true,
+            buildingMode: true,
+        },
     });
 
+    if (!oldProject) {
+        return NextResponse.json({ error: '项目不存在' }, { status: 404 });
+    }
+
     const newContractId = data.contractId || null;
-    const isNewContractLink = !oldProject?.contractId && newContractId;
+    const isNewContractLink = !oldProject.contractId && newContractId;
+    let nextProjectName = String(data.name ?? '').trim();
+
+    if (!nextProjectName) {
+        return NextResponse.json({ error: '项目名称不能为空' }, { status: 400 });
+    }
+
+    if (isLikelyCorruptedProjectName(nextProjectName)) {
+        const repairedName = !isLikelyCorruptedProjectName(oldProject.name)
+            ? oldProject.name
+            : await resolveProjectNameRepairCandidate(prisma, {
+                projectId,
+                contractId: oldProject.contractId || newContractId,
+            });
+
+        if (repairedName) {
+            nextProjectName = repairedName;
+        }
+    }
+
+    const nextPhase = data.phase ? String(data.phase).trim() : null;
+    const nextBuildingMode = normalizeBuildingMode(
+        data.buildingMode,
+        Boolean(oldProject.buildingMode),
+    );
+    // Removed phase check for buildingMode
+
+    const duplicate = await prisma.project.findFirst({
+        where: {
+            name: nextProjectName,
+            phase: nextPhase,
+            NOT: {
+                id: projectId,
+            },
+        },
+    });
+    if (duplicate) {
+        return NextResponse.json({ error: `已存在同名项目：${buildProjectDisplayName(nextProjectName, nextPhase)}` }, { status: 409 });
+    }
 
     const updateData = {
-        name: data.name,
+        name: nextProjectName,
         status: data.status || '进行中',
-        phase: data.phase || null,
+        phase: nextPhase,
+        buildingMode: nextBuildingMode,
         contractId: newContractId,
     };
 
-    // 首次关联合同时记录时间
     if (isNewContractLink) {
         updateData.contractLinkedAt = new Date();
     }
@@ -71,7 +139,6 @@ export async function PUT(request) {
         include: { contract: true },
     });
 
-    // 首次关联合同 → 自动触发补算
     let retroResult = null;
     if (isNewContractLink) {
         retroResult = await retroactiveCalculation(projectId);

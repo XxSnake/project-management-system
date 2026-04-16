@@ -1,6 +1,7 @@
 import { findBestPriceMatch } from '@/lib/worklogMatching';
 import { normalizeAllocationShare, normalizePricingMode } from '@/lib/worklogBilling';
 import { applyProductionCap } from '@/lib/productionCap';
+import { isNonBillableLayoutWork } from '@/lib/worklogClassification';
 import prisma from '@/lib/prisma';
 
 async function resolveProjectWithContract(workLog) {
@@ -109,6 +110,14 @@ export async function calculateProductionValue(workLog, staffIds) {
     const quantity = Number.parseFloat(workLog?.quantity);
     if (!Number.isFinite(quantity) || quantity <= 0) {
         return { status: 'invalid-quantity' };
+    }
+
+    if (isNonBillableLayoutWork(workLog)) {
+        return {
+            status: 'non-billable-layout',
+            mode: 'none',
+            message: '布点工作仅记录工作量，不计入产值',
+        };
     }
 
     const project = await resolveProjectWithContract(workLog);
@@ -326,6 +335,232 @@ export async function calculateReportProductionValue(report, roleStaffMap) {
     };
 }
 
+function createWorklogRebuildStats(total) {
+    return {
+        total,
+        created: 0,
+        pendingAreaShare: 0,
+        workloadOnly: 0,
+        nonBillableLayout: 0,
+        noMatch: 0,
+        noStaff: 0,
+        invalidQuantity: 0,
+        exceeded: 0,
+    };
+}
+
+function createReportRebuildStats(total) {
+    return {
+        total,
+        created: 0,
+        noMatch: 0,
+        noRoles: 0,
+        invalidQuantity: 0,
+        exceeded: 0,
+    };
+}
+
+function applyWorklogRebuildResult(stats, result) {
+    switch (result?.status) {
+    case 'created':
+        stats.created += 1;
+        if (result.exceeded) {
+            stats.exceeded += 1;
+        }
+        break;
+    case 'pending-area-share':
+        stats.pendingAreaShare += 1;
+        break;
+    case 'workload-only':
+        stats.workloadOnly += 1;
+        break;
+    case 'non-billable-layout':
+        stats.workloadOnly += 1;
+        stats.nonBillableLayout += 1;
+        break;
+    case 'no-staff':
+        stats.noStaff += 1;
+        break;
+    case 'invalid-quantity':
+        stats.invalidQuantity += 1;
+        break;
+    default:
+        stats.noMatch += 1;
+        break;
+    }
+}
+
+function applyReportRebuildResult(stats, result) {
+    switch (result?.status) {
+    case 'created':
+        stats.created += 1;
+        if (result.exceeded) {
+            stats.exceeded += 1;
+        }
+        break;
+    case 'no-roles':
+        stats.noRoles += 1;
+        break;
+    case 'invalid-quantity':
+        stats.invalidQuantity += 1;
+        break;
+    default:
+        stats.noMatch += 1;
+        break;
+    }
+}
+
+function buildReportRoleStaffMap(roles = []) {
+    const roleStaffMap = {};
+    roles.forEach((role) => {
+        if (role?.roleType && role?.staffId) {
+            roleStaffMap[role.roleType] = role.staffId;
+        }
+    });
+    return roleStaffMap;
+}
+
+function getTimelineDate(item) {
+    const value = item.kind === 'worklog' ? item.entry.workDate : item.entry.reportDate;
+    return value ? new Date(value).getTime() : new Date(item.entry.createdAt).getTime();
+}
+
+export async function rebuildProjectProduction(projectId, options = {}) {
+    const clearManualValues = options.clearManualValues === true;
+
+    const project = await prisma.project.findUnique({
+        where: { id: projectId },
+        include: {
+            contract: {
+                include: {
+                    priceItems: true,
+                },
+            },
+        },
+    });
+
+    if (!project) {
+        return {
+            status: 'project-not-found',
+            projectId,
+        };
+    }
+
+    if (clearManualValues && project.contract) {
+        await prisma.workLog.updateMany({
+            where: {
+                projectId,
+                manualTotalValue: {
+                    not: null,
+                },
+            },
+            data: {
+                manualTotalValue: null,
+                manualValueNote: null,
+            },
+        });
+    }
+
+    const [workLogs, reports] = await Promise.all([
+        prisma.workLog.findMany({
+            where: { projectId },
+            include: {
+                staffMembers: {
+                    include: {
+                        staff: true,
+                    },
+                },
+            },
+            orderBy: [
+                { workDate: 'asc' },
+                { createdAt: 'asc' },
+            ],
+        }),
+        prisma.testReport.findMany({
+            where: { projectId },
+            include: {
+                roles: {
+                    include: {
+                        staff: true,
+                    },
+                },
+            },
+            orderBy: [
+                { reportDate: 'asc' },
+                { createdAt: 'asc' },
+            ],
+        }),
+    ]);
+
+    if (workLogs.length > 0 || reports.length > 0) {
+        const workLogIds = workLogs.map((item) => item.id);
+        const reportIds = reports.map((item) => item.id);
+
+        await prisma.productionValue.deleteMany({
+            where: {
+                OR: [
+                    workLogIds.length > 0 ? { workLogId: { in: workLogIds } } : undefined,
+                    reportIds.length > 0 ? { reportId: { in: reportIds } } : undefined,
+                ].filter(Boolean),
+            },
+        });
+    }
+
+    const worklogs = createWorklogRebuildStats(workLogs.length);
+    const reportStats = createReportRebuildStats(reports.length);
+
+    const timeline = [
+        ...workLogs.map((entry) => ({ kind: 'worklog', entry })),
+        ...reports.map((entry) => ({ kind: 'report', entry })),
+    ].sort((left, right) => {
+        const diff = getTimelineDate(left) - getTimelineDate(right);
+        if (diff !== 0) {
+            return diff;
+        }
+
+        if (left.kind !== right.kind) {
+            return left.kind === 'worklog' ? -1 : 1;
+        }
+
+        return left.entry.id - right.entry.id;
+    });
+
+    for (const item of timeline) {
+        if (item.kind === 'worklog') {
+            const staffIds = item.entry.staffMembers.map((staffMember) => staffMember.staffId);
+            const result = await calculateProductionValue(
+                {
+                    ...item.entry,
+                    project,
+                },
+                staffIds,
+            );
+            applyWorklogRebuildResult(worklogs, result);
+            continue;
+        }
+
+        const roleStaffMap = buildReportRoleStaffMap(item.entry.roles);
+        const result = await calculateReportProductionValue(
+            {
+                ...item.entry,
+                project,
+            },
+            roleStaffMap,
+        );
+        applyReportRebuildResult(reportStats, result);
+    }
+
+    return {
+        status: 'completed',
+        projectId,
+        projectName: project.name,
+        hasContract: Boolean(project.contract),
+        pricingMode: normalizePricingMode(project.contract?.pricingMode),
+        worklogs,
+        reports: reportStats,
+    };
+}
+
 /**
  * 补算：项目关联合同后，对历史工作日志进行产值补算
  * @param {number} projectId - 项目ID
@@ -349,16 +584,20 @@ export async function retroactiveCalculation(projectId) {
     const contract = project.contract;
     const pricingMode = normalizePricingMode(contract.pricingMode);
 
-    // 查找该项目所有没有产值记录、或仅有手动产值的工作日志
-    // （手动产值可能是未签合同期间的临时输入，关联合同后应重新计算）
-    const unpricedLogs = await prisma.workLog.findMany({
-        where: {
+    const shouldRecalculateAllLogs = pricingMode === 'unit' || pricingMode === 'mixed';
+    const targetLogWhere = shouldRecalculateAllLogs
+        ? { projectId }
+        : {
             projectId,
             OR: [
                 { productionValues: { none: {} } },
                 { productionValues: { every: { calculationMode: 'manual' } } },
             ],
-        },
+        };
+
+    // 单价/混合合同需要整项目重跑，才能把已经算错的旧产值一起纠正回来
+    const unpricedLogs = await prisma.workLog.findMany({
+        where: targetLogWhere,
         include: {
             project: { include: { contract: true } },
             staffMembers: { include: { staff: true } },
@@ -375,6 +614,8 @@ export async function retroactiveCalculation(projectId) {
         total: unpricedLogs.length,
         calculated: 0,
         pendingAreaShare: 0,
+        workloadOnly: 0,
+        nonBillableLayout: 0,
         noMatch: 0,
         exceeded: 0,
         details: [],
@@ -430,6 +671,11 @@ export async function retroactiveCalculation(projectId) {
             }
         } else if (calcResult.status === 'pending-area-share') {
             results.pendingAreaShare += 1;
+        } else if (calcResult.status === 'workload-only') {
+            results.workloadOnly += 1;
+        } else if (calcResult.status === 'non-billable-layout') {
+            results.workloadOnly += 1;
+            results.nonBillableLayout += 1;
         } else {
             results.noMatch += 1;
         }

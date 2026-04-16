@@ -3,6 +3,7 @@ import * as XLSX from 'xlsx';
 import { hasTaskProvider, requestTaskModel } from '@/lib/modelGateway';
 
 const SIMPLE_QUANTITY_REGEX = /^(\d+(?:\.\d+)?)\s*([\u4e00-\u9fa5A-Za-z%]+)?$/u;
+const QUANTITY_CANDIDATE_REGEX = /(\d+(?:\.\d+)?)(个构件|构件|点|组|根|栋|项|处|个|柱|梁|米|m²|㎡|m2|m)/gu;
 const MODEL_BATCH_SIZE = 6;
 const MAX_MODEL_ROWS_PER_IMPORT = 6;
 const COMMON_ITEM_NAMES = [
@@ -135,6 +136,80 @@ function parseDateValue(value) {
     return null;
 }
 
+function normalizeQuantityUnit(unit) {
+    const rawUnit = cleanCellValue(unit);
+    if (!rawUnit) {
+        return null;
+    }
+
+    if (rawUnit === '构件' || rawUnit === '个构件') return '个构件';
+    if (rawUnit === 'm²' || rawUnit === '㎡' || rawUnit === 'm2') return '㎡';
+    if (rawUnit === 'm') return '米';
+    return rawUnit;
+}
+
+function getQuantityUnitPriority(unit) {
+    const normalizedUnit = normalizeQuantityUnit(unit);
+    switch (normalizedUnit) {
+    case '点':
+        return 9;
+    case '根':
+        return 8;
+    case '处':
+        return 7;
+    case '项':
+        return 6;
+    case '个构件':
+        return 5;
+    case '米':
+    case '㎡':
+        return 4;
+    case '柱':
+    case '梁':
+    case '个':
+        return 3;
+    case '组':
+        return 1;
+    case '栋':
+        return 0;
+    default:
+        return 2;
+    }
+}
+
+function extractQuantityCandidates(quantityText) {
+    const normalizedText = cleanCellValue(quantityText).replace(/\s+/gu, '');
+    const candidates = [];
+    let match;
+    QUANTITY_CANDIDATE_REGEX.lastIndex = 0;
+
+    while ((match = QUANTITY_CANDIDATE_REGEX.exec(normalizedText)) !== null) {
+        candidates.push({
+            quantity: Number.parseFloat(match[1]),
+            unit: normalizeQuantityUnit(match[2]),
+            index: match.index,
+        });
+    }
+
+    return candidates;
+}
+
+function pickBestQuantityCandidate(candidates) {
+    if (!Array.isArray(candidates) || candidates.length === 0) {
+        return null;
+    }
+
+    return candidates
+        .filter((candidate) => Number.isFinite(candidate.quantity))
+        .sort((left, right) => {
+            const priorityDiff = getQuantityUnitPriority(right.unit) - getQuantityUnitPriority(left.unit);
+            if (priorityDiff !== 0) {
+                return priorityDiff;
+            }
+            return left.index - right.index;
+        })[0] || null;
+}
+
 function parseQuantityField(value) {
     const quantityText = cleanCellValue(value);
     if (!quantityText) {
@@ -146,7 +221,7 @@ function parseQuantityField(value) {
     if (simpleMatch) {
         return {
             quantity: Number.parseFloat(simpleMatch[1]),
-            unit: simpleMatch[2] || null,
+            unit: normalizeQuantityUnit(simpleMatch[2]) || null,
             quantityText,
         };
     }
@@ -155,6 +230,15 @@ function parseQuantityField(value) {
         return {
             quantity: Number.parseFloat(compact),
             unit: null,
+            quantityText,
+        };
+    }
+
+    const bestCandidate = pickBestQuantityCandidate(extractQuantityCandidates(quantityText));
+    if (bestCandidate) {
+        return {
+            quantity: bestCandidate.quantity,
+            unit: bestCandidate.unit,
             quantityText,
         };
     }
@@ -263,6 +347,77 @@ function createAtomicRow(baseRow, overrides = {}) {
     };
 }
 
+function extractObservationContext(text) {
+    const rawText = cleanCellValue(text);
+    if (!rawText) {
+        return '';
+    }
+
+    const match = rawText.match(/^(.*?)(沉降|竖向|水平|倾斜|位移|观测|布点)/u);
+    return match ? match[1].replace(/[、/]+$/u, '').trim() : '';
+}
+
+function normalizeObservationNotes(label, keyword) {
+    return cleanCellValue(label)
+        .replace(keyword, '')
+        .replace(/观测|布点|位移|监测|测/gu, '')
+        .replace(/[、/]+$/u, '')
+        .trim();
+}
+
+function resolveObservationSegment(row, label) {
+    const baseText = cleanCellValue(row.testContent);
+    const normalizedLabel = cleanCellValue(label).replace(/[：:]/gu, '');
+    const baseContext = extractObservationContext(baseText);
+
+    if (/布/u.test(normalizedLabel)) {
+        return {
+            testContent: baseText.includes('沉降') ? '沉降布点' : `${baseText || '观测'}布点`,
+            notes: baseContext || normalizeObservationNotes(normalizedLabel, /布/u),
+        };
+    }
+
+    if (/水平/u.test(normalizedLabel)) {
+        return {
+            testContent: '水平位移监测',
+            notes: normalizeObservationNotes(normalizedLabel, /水平/u) || baseContext,
+        };
+    }
+
+    if (/竖向/u.test(normalizedLabel)) {
+        return {
+            testContent: '竖向位移监测',
+            notes: normalizeObservationNotes(normalizedLabel, /竖向/u) || baseContext,
+        };
+    }
+
+    if (/倾斜/u.test(normalizedLabel)) {
+        return {
+            testContent: '倾斜观测',
+            notes: normalizeObservationNotes(normalizedLabel, /倾斜/u) || baseContext,
+        };
+    }
+
+    if (/沉降/u.test(normalizedLabel)) {
+        return {
+            testContent: '沉降观测',
+            notes: normalizeObservationNotes(normalizedLabel, /沉降/u) || baseContext,
+        };
+    }
+
+    if (/测|观测/u.test(normalizedLabel)) {
+        return {
+            testContent: baseText.includes('沉降') ? '沉降观测' : (baseText || '观测'),
+            notes: baseContext || normalizeObservationNotes(normalizedLabel, /测|观测/gu),
+        };
+    }
+
+    return {
+        testContent: baseText,
+        notes: baseContext,
+    };
+}
+
 function expandDisplacementRow(row) {
     if (!/竖向位移|水平位移/u.test(row.quantityText || '')) {
         return null;
@@ -302,6 +457,54 @@ function expandDisplacementRow(row) {
     return expanded.length > 0 ? expanded : null;
 }
 
+function expandObservationBundleRow(row) {
+    const quantityText = cleanCellValue(row.quantityText);
+    const baseText = cleanCellValue(row.testContent);
+    if (!quantityText) {
+        return null;
+    }
+
+    if (!/沉降|观测|布点|布\d|测\d|竖向|水平|倾斜|位移/u.test(`${baseText} ${quantityText}`)) {
+        return null;
+    }
+
+    const normalizedText = quantityText
+        .replace(/[，,；;]/gu, '、')
+        .replace(/\s+/gu, '');
+    const segmentRegex = /([^0-9、]{0,16}?)(\d+(?:\.\d+)?)(点|组|根|项|处|个构件|构件|个)/gu;
+    const segments = [];
+    let match;
+
+    while ((match = segmentRegex.exec(normalizedText)) !== null) {
+        segments.push({
+            label: cleanCellValue(match[1]),
+            quantity: match[2],
+            unit: normalizeQuantityUnit(match[3]) || match[3],
+        });
+    }
+
+    if (segments.length === 0) {
+        return null;
+    }
+
+    if (
+        segments.length === 1
+        && !/布|测|沉降|竖向|水平|倾斜|位移/u.test(segments[0].label)
+    ) {
+        return null;
+    }
+
+    return segments.map((segment) => {
+        const resolved = resolveObservationSegment(row, segment.label);
+        return createAtomicRow(row, {
+            testContent: resolved.testContent,
+            quantity: segment.quantity,
+            unit: segment.unit,
+            notes: resolved.notes,
+        });
+    });
+}
+
 function normalizeBundleItemName(name, fallbackName) {
     const rawName = cleanCellValue(name || fallbackName);
     if (!rawName) {
@@ -313,10 +516,53 @@ function normalizeBundleItemName(name, fallbackName) {
     if (rawName.includes('砂浆贯入')) return '砂浆贯入';
     if (rawName.includes('超声')) return '超声法';
     if (rawName.includes('净高')) return '净高';
+    if (rawName.includes('层高')) return '净高';
     if (rawName.includes('板厚')) return '板厚';
     if (rawName.includes('保护层')) return '保护层';
+    if (rawName.includes('植筋')) return '植筋拉拔';
+    if (rawName.includes('防雷')) return '防雷检测';
 
     return rawName;
+}
+
+function splitCombinedBundleNames(name) {
+    const rawName = cleanCellValue(name);
+    if (!rawName) {
+        return [];
+    }
+
+    if (/板厚.*层高|层高.*板厚/u.test(rawName)) {
+        return ['板厚', '层高'];
+    }
+
+    return [rawName];
+}
+
+function getBundleUnit(itemName, fallbackUnit) {
+    const normalizedName = normalizeBundleItemName(itemName, itemName);
+    const normalizedUnit = normalizeQuantityUnit(fallbackUnit) || fallbackUnit;
+
+    if (normalizedName === '保护层') return '处';
+    if (normalizedName === '板厚' || normalizedName === '净高') return '点';
+    if (normalizedUnit === '构件' || normalizedUnit === '个构件') return '个构件';
+    return normalizedUnit;
+}
+
+function appendExpandedBundleItems(expanded, row, name, quantity, unit, notes = '') {
+    const itemNames = splitCombinedBundleNames(name);
+    if (itemNames.length === 0) {
+        return;
+    }
+
+    itemNames.forEach((itemName) => {
+        const normalizedName = normalizeBundleItemName(itemName, row.testContent);
+        expanded.push(createAtomicRow(row, {
+            testContent: normalizedName,
+            quantity,
+            unit: getBundleUnit(normalizedName, unit),
+            notes,
+        }));
+    });
 }
 
 function expandMethodBundleRow(row) {
@@ -339,63 +585,57 @@ function expandMethodBundleRow(row) {
     segments.forEach((segment) => {
         const multiplierMatch = segment.match(/^(.+?)[*×xX](\d+(?:\.\d+)?)$/u);
         if (multiplierMatch) {
-            expanded.push(createAtomicRow(row, {
-                testContent: normalizeBundleItemName(multiplierMatch[1], row.testContent),
-                quantity: multiplierMatch[2],
-                unit: '处',
-            }));
+            appendExpandedBundleItems(expanded, row, multiplierMatch[1], multiplierMatch[2], '处');
             return;
         }
 
         const namedBeamColumnMatch = segment.match(/^([^\d]+?)(\d+(?:\.\d+)?)柱(\d+(?:\.\d+)?)梁$/u);
         if (namedBeamColumnMatch) {
-            const itemName = normalizeBundleItemName(namedBeamColumnMatch[1], row.testContent);
-            expanded.push(createAtomicRow(row, {
-                testContent: itemName,
-                quantity: namedBeamColumnMatch[2],
-                unit: '柱',
-            }));
-            expanded.push(createAtomicRow(row, {
-                testContent: itemName,
-                quantity: namedBeamColumnMatch[3],
-                unit: '梁',
-            }));
+            appendExpandedBundleItems(expanded, row, namedBeamColumnMatch[1], namedBeamColumnMatch[2], '柱');
+            appendExpandedBundleItems(expanded, row, namedBeamColumnMatch[1], namedBeamColumnMatch[3], '梁');
             return;
         }
 
         const beamColumnWithNameMatch = segment.match(/^(\d+(?:\.\d+)?)柱(\d+(?:\.\d+)?)梁[（(]([^）)]+)[）)]$/u);
         if (beamColumnWithNameMatch) {
-            const itemName = normalizeBundleItemName(beamColumnWithNameMatch[3], row.testContent);
-            expanded.push(createAtomicRow(row, {
-                testContent: itemName,
-                quantity: beamColumnWithNameMatch[1],
-                unit: '柱',
-            }));
-            expanded.push(createAtomicRow(row, {
-                testContent: itemName,
-                quantity: beamColumnWithNameMatch[2],
-                unit: '梁',
-            }));
+            appendExpandedBundleItems(expanded, row, beamColumnWithNameMatch[3], beamColumnWithNameMatch[1], '柱');
+            appendExpandedBundleItems(expanded, row, beamColumnWithNameMatch[3], beamColumnWithNameMatch[2], '梁');
             return;
         }
 
         const leadingQuantityMatch = segment.match(/^(\d+(?:\.\d+)?)(净高|板厚|保护层)$/u);
         if (leadingQuantityMatch) {
-            expanded.push(createAtomicRow(row, {
-                testContent: normalizeBundleItemName(leadingQuantityMatch[2], row.testContent),
-                quantity: leadingQuantityMatch[1],
-                unit: leadingQuantityMatch[2] === '保护层' ? '点' : '处',
-            }));
+            appendExpandedBundleItems(
+                expanded,
+                row,
+                leadingQuantityMatch[2],
+                leadingQuantityMatch[1],
+                leadingQuantityMatch[2] === '保护层' ? '处' : '点',
+            );
             return;
         }
 
-        const genericMatch = segment.match(/^(.+?)(\d+(?:\.\d+)?)(柱|梁|点|项|处|个|组|根)$/u);
+        const bareStructureMatch = segment.match(/^(\d+(?:\.\d+)?)(?:个)?构件(?:[（(][^）)]*[）)])?$/u);
+        if (bareStructureMatch) {
+            appendExpandedBundleItems(expanded, row, row.testContent, bareStructureMatch[1], '个构件');
+            return;
+        }
+
+        const namedEachMatch = segment.match(/^(.+?)各(\d+(?:\.\d+)?)(个构件|构件|点|项|处|个|组|根)$/u);
+        if (namedEachMatch) {
+            appendExpandedBundleItems(expanded, row, namedEachMatch[1], namedEachMatch[2], namedEachMatch[3]);
+            return;
+        }
+
+        const colonItemMatch = segment.match(/^(.+?)[：:](?:\d+(?:\.\d+)?圆)?(\d+(?:\.\d+)?)(根|点|项|处|个构件|构件|个|组)$/u);
+        if (colonItemMatch) {
+            appendExpandedBundleItems(expanded, row, colonItemMatch[1], colonItemMatch[2], colonItemMatch[3]);
+            return;
+        }
+
+        const genericMatch = segment.match(/^(.+?)(\d+(?:\.\d+)?)(个构件|构件|柱|梁|点|项|处|个|组|根)(?:[（(][^）)]*[）)])?$/u);
         if (genericMatch) {
-            expanded.push(createAtomicRow(row, {
-                testContent: normalizeBundleItemName(genericMatch[1], row.testContent),
-                quantity: genericMatch[2],
-                unit: genericMatch[3] === '个' ? '处' : genericMatch[3],
-            }));
+            appendExpandedBundleItems(expanded, row, genericMatch[1], genericMatch[2], genericMatch[3]);
         }
     });
 
@@ -413,8 +653,8 @@ function needsModelExpansion(row) {
 
     const hasBundleSignals = (
         /[\n*×xX]/u.test(row.quantityText)
-        || /柱|梁|净高|板厚|保护层|回弹|贯入/u.test(row.quantityText)
-        || /[、,，]/u.test(row.testContent)
+        || /柱|梁|净高|板厚|层高|保护层|构件|植筋|回弹|贯入|沉降|竖向|水平|布\d|测\d/u.test(row.quantityText)
+        || /[、,，/]/u.test(row.testContent)
     );
 
     if (!hasBundleSignals) {
@@ -424,8 +664,8 @@ function needsModelExpansion(row) {
     return (
         row.quantity === 0
         || /[\n*×xX、,，;；]/u.test(row.quantityText)
-        || /[、,，]/u.test(row.testContent)
-        || /回弹|贯入|净高|板厚|保护层|超声/u.test(row.quantityText)
+        || /[、,，/]/u.test(row.testContent)
+        || /回弹|贯入|净高|层高|板厚|保护层|超声|构件|植筋|布\d|测\d/u.test(row.quantityText)
     );
 }
 
@@ -613,6 +853,12 @@ export async function expandWorklogRows(rows) {
         const localExpanded = expandDisplacementRow(row);
         if (localExpanded?.length) {
             expandedRows[index] = localExpanded;
+            return;
+        }
+
+        const observationExpanded = expandObservationBundleRow(row);
+        if (observationExpanded?.length) {
+            expandedRows[index] = observationExpanded;
             return;
         }
 

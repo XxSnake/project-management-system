@@ -2,9 +2,17 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import { buildProjectDisplayName } from '@/lib/projectDisplayName';
 
 const STATUS_OPTIONS = ['进行中', '已完成', '暂停'];
-const EMPTY_FORM = { id: '', name: '', status: '进行中', phase: '', contractId: '' };
+const EMPTY_FORM = {
+    id: '',
+    name: '',
+    status: '进行中',
+    phase: '',
+    contractId: '',
+    buildingMode: false,
+};
 
 function normalizeStatus(value) {
     if (value === '已完成' || value === '宸插畬鎴?') return '已完成';
@@ -38,6 +46,10 @@ function getContractDisplayName(contract) {
     return parts.length > 0 ? parts.join(' | ') : `合同 #${contract.id}`;
 }
 
+function getProjectOptionLabel(project) {
+    return buildProjectDisplayName(project);
+}
+
 export default function ProjectsPage() {
     const router = useRouter();
     const [projects, setProjects] = useState([]);
@@ -47,11 +59,17 @@ export default function ProjectsPage() {
     const [selectedIds, setSelectedIds] = useState([]);
     const [deletingBatch, setDeletingBatch] = useState(false);
     const [linkingProjectId, setLinkingProjectId] = useState(null);
+    const [linkingSelections, setLinkingSelections] = useState({});
     const [linkingSaving, setLinkingSaving] = useState(false);
     const [showMerge, setShowMerge] = useState(false);
     const [mergeTargetId, setMergeTargetId] = useState('');
     const [merging, setMerging] = useState(false);
     const [viewingContract, setViewingContract] = useState(null);
+    const [sameContractDecision, setSameContractDecision] = useState(null);
+    const [sameContractMode, setSameContractMode] = useState('subitem');
+    const [sameContractTargetId, setSameContractTargetId] = useState('');
+    const [sameContractPhase, setSameContractPhase] = useState('');
+    const [sameContractSubmitting, setSameContractSubmitting] = useState(false);
 
     const refreshData = async () => {
         const [projectResponse, contractResponse] = await Promise.all([
@@ -113,6 +131,7 @@ export default function ProjectsPage() {
                 status: normalizeStatus(form.status),
                 phase: form.phase || null,
                 contractId: form.contractId ? Number.parseInt(form.contractId, 10) : null,
+                buildingMode: Boolean(form.buildingMode),
             }),
         });
 
@@ -134,6 +153,7 @@ export default function ProjectsPage() {
             status: normalizeStatus(project.status),
             phase: project.phase || '',
             contractId: project.contractId ? String(project.contractId) : '',
+            buildingMode: Boolean(project.buildingMode),
         });
         setShowForm(true);
     };
@@ -246,7 +266,7 @@ export default function ProjectsPage() {
 
         const params = new URLSearchParams({
             projectId: String(project.id),
-            projectName: project.name || '',
+            projectName: getProjectOptionLabel(project),
         });
 
         router.push(`/contracts?${params.toString()}`);
@@ -267,6 +287,7 @@ export default function ProjectsPage() {
                     status: normalizeStatus(project.status),
                     phase: project.phase || null,
                     contractId: contractId || null,
+                    buildingMode: Boolean(project.buildingMode),
                 }),
             });
 
@@ -293,10 +314,255 @@ export default function ProjectsPage() {
         }
     };
 
+    const openLinkingProject = (project) => {
+        if (!project?.id) {
+            return;
+        }
+
+        setLinkingProjectId(project.id);
+        setLinkingSelections((current) => ({
+            ...current,
+            [project.id]: project.contractId ? String(project.contractId) : '',
+        }));
+    };
+
+    const resetLinkingSelection = (projectId) => {
+        setLinkingSelections((current) => {
+            const next = { ...current };
+            const project = projects.find((item) => item.id === projectId);
+
+            if (project) {
+                next[projectId] = project.contractId ? String(project.contractId) : '';
+            } else {
+                delete next[projectId];
+            }
+
+            return next;
+        });
+    };
+
+    const closeLinkingProject = (projectId = linkingProjectId) => {
+        setLinkingSelections((current) => {
+            const next = { ...current };
+            if (projectId !== null && projectId !== undefined) {
+                delete next[projectId];
+            }
+            return next;
+        });
+
+        if (projectId === linkingProjectId) {
+            setLinkingProjectId(null);
+        }
+    };
+
+    const closeSameContractDecision = (resetSelection = true) => {
+        if (resetSelection && sameContractDecision?.projectId) {
+            resetLinkingSelection(sameContractDecision.projectId);
+        }
+
+        setSameContractDecision(null);
+        setSameContractMode('subitem');
+        setSameContractTargetId('');
+        setSameContractPhase('');
+    };
+
+    const notifyRetroactiveResult = (data) => {
+        const result = data?.retroactiveResult;
+        if (!result) {
+            return;
+        }
+
+        if (result.status === 'completed' && result.calculated > 0) {
+            alert(`已关联合同并完成产值补算：\n补算 ${result.calculated} 条记录${result.exceeded > 0 ? `，其中 ${result.exceeded} 条超限` : ''}${result.pendingAreaShare > 0 ? `\n还有 ${result.pendingAreaShare} 条面积合同记录需要补填占比` : ''}`);
+            return;
+        }
+
+        if (result.status === 'completed' && result.pendingAreaShare > 0) {
+            alert(`已关联面积合同，有 ${result.pendingAreaShare} 条历史记录需要在工作记录页面补填占比后才能计算产值。`);
+        }
+    };
+
+    const saveProjectContractLink = async (project, contractId, phaseOverride) => {
+        if (!project) {
+            return false;
+        }
+
+        const resolvedPhase = phaseOverride !== undefined
+            ? (phaseOverride ? String(phaseOverride).trim() : null)
+            : (project.phase || null);
+
+        setLinkingSaving(true);
+        try {
+            const response = await fetch('/api/projects', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    id: project.id,
+                    name: project.name,
+                    status: normalizeStatus(project.status),
+                    phase: resolvedPhase,
+                    contractId: contractId || null,
+                    buildingMode: Boolean(project.buildingMode),
+                }),
+            });
+
+            const data = await response.json();
+            if (!response.ok) {
+                alert(data.error || '关联合同失败');
+                resetLinkingSelection(project.id);
+                return false;
+            }
+
+            notifyRetroactiveResult(data);
+            closeLinkingProject(project.id);
+            await refreshData();
+            return true;
+        } finally {
+            setLinkingSaving(false);
+        }
+    };
+
+    const handleLinkContractSelection = async (project, contractId) => {
+        if (!project) {
+            return;
+        }
+
+        const isChangingContract = Number(project.contractId || 0) !== Number(contractId || 0);
+        const linkedProjects = contractId
+            ? projects.filter((item) => item.id !== project.id && item.contractId === contractId)
+            : [];
+
+        if (isChangingContract && contractId && linkedProjects.length > 0) {
+            setSameContractDecision({
+                projectId: project.id,
+                contractId,
+                linkedProjectIds: linkedProjects.map((item) => item.id),
+            });
+            setSameContractMode('subitem');
+            setSameContractTargetId(String(linkedProjects[0].id));
+            setSameContractPhase(project.phase || '');
+            return;
+        }
+
+        await saveProjectContractLink(project, contractId);
+    };
+
+    const handleConfirmSameContractDecision = async () => {
+        if (!sameContractDecision) {
+            return;
+        }
+
+        const project = projects.find((item) => item.id === sameContractDecision.projectId);
+        if (!project) {
+            closeSameContractDecision();
+            return;
+        }
+
+        if (sameContractMode === 'subitem') {
+            const rawPhase = sameContractPhase.trim();
+            if (!rawPhase && !confirm('这条项目会继续挂在同一份合同下，但“工程阶段 / 子项”仍然留空。以后列表里可能还是不好区分，确认继续吗？')) {
+                return;
+            }
+            const nextPhase = rawPhase || '__ALLOW_BLANK_PHASE__';
+            if (!nextPhase && !confirm('这条项目会继续挂在同一份合同下，但“工程阶段 / 子项”仍然留空。以后列表里可能还是不好区分，确认继续吗？')) {
+                return;
+            }
+
+            const success = await saveProjectContractLink(
+                project,
+                sameContractDecision.contractId,
+                nextPhase === '__ALLOW_BLANK_PHASE__' ? null : nextPhase,
+            );
+            if (success) {
+                closeSameContractDecision(false);
+                alert(nextPhase === '__ALLOW_BLANK_PHASE__'
+                    ? '已保留为同合同下的独立子项，但“工程阶段 / 子项”仍然留空。'
+                    : `已保留为同合同下的独立子项，子项已记为“${nextPhase}”。`);
+                return;
+                alert(project.phase ? "已保留为同合同下的独立子项，当前的阶段/子项会继续保留。" : "已保留为同合同下的独立子项。后面如果要区分楼栋、单体或分项，可以继续填写阶段/子项。");
+            }
+            return;
+        }
+
+        const targetId = Number.parseInt(sameContractTargetId, 10);
+        if (!targetId) {
+            alert('请先选择要保留的项目');
+            return;
+        }
+
+        const targetProject = projects.find((item) => item.id === targetId);
+        if (!targetProject) {
+            alert('目标项目不存在');
+            return;
+        }
+
+        setSameContractSubmitting(true);
+        try {
+            const response = await fetch('/api/projects/merge', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    targetId,
+                    sourceIds: [project.id],
+                }),
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || '合并失败');
+            }
+
+            alert(`已将项目“${getProjectOptionLabel(project)}”合并到“${getProjectOptionLabel(targetProject)}”，原项目里的记录已经全部转过去。`);
+            setSelectedIds((current) => current.filter((id) => id !== project.id));
+            closeLinkingProject(project.id);
+            closeSameContractDecision(false);
+            await refreshData();
+        } catch (error) {
+            alert(error.message);
+        } finally {
+            setSameContractSubmitting(false);
+        }
+    };
+
     const normalizedProjects = useMemo(
         () => projects.map((project) => ({ ...project, normalizedStatus: normalizeStatus(project.status) })),
         [projects],
     );
+    const sharedContractWarningGroups = useMemo(() => {
+        const groups = new Map();
+
+        normalizedProjects.forEach((project) => {
+            if (!project.contractId) {
+                return;
+            }
+
+            if (!groups.has(project.contractId)) {
+                groups.set(project.contractId, []);
+            }
+            groups.get(project.contractId).push(project);
+        });
+
+        return Array.from(groups.entries())
+            .map(([contractId, linkedProjects]) => {
+                const missingPhaseProjects = linkedProjects.filter((project) => !project.phase);
+                if (linkedProjects.length <= 1 || missingPhaseProjects.length === 0) {
+                    return null;
+                }
+
+                return {
+                    contractId,
+                    contract: contracts.find((item) => item.id === contractId) || null,
+                    linkedProjects,
+                    missingPhaseProjects,
+                };
+            })
+            .filter(Boolean)
+            .sort((left, right) => {
+                if (right.missingPhaseProjects.length !== left.missingPhaseProjects.length) {
+                    return right.missingPhaseProjects.length - left.missingPhaseProjects.length;
+                }
+                return right.linkedProjects.length - left.linkedProjects.length;
+            });
+    }, [contracts, normalizedProjects]);
 
     const activeCount = normalizedProjects.filter((item) => item.normalizedStatus === '进行中').length;
     const completedCount = normalizedProjects.filter((item) => item.normalizedStatus === '已完成').length;
@@ -309,7 +575,7 @@ export default function ProjectsPage() {
                 <div>
                     <div className="page-kicker">Data Fabric</div>
                     <h2>项目管理</h2>
-                    <p className="page-desc">维护项目状态、阶段和合同关联。现在支持批量选择删除，便于清理误导入或测试项目。</p>
+                    <p className="page-desc">维护项目状态、工程阶段 / 子项、单体建筑模式和合同关联。遇到同一份合同已经绑过别的项目时，会先让你选择是直接合并，还是保留成同合同下的不同子项。</p>
                 </div>
                 <div className="page-actions">
                     <button type="button" className="btn btn-secondary" onClick={() => void refreshData()}>刷新</button>
@@ -343,6 +609,31 @@ export default function ProjectsPage() {
                     </button>
                 </div>
             </div>
+
+            {sharedContractWarningGroups.length > 0 ? (
+                <div className="card stack" style={{ marginBottom: 16, borderColor: 'rgba(217, 119, 6, 0.35)', background: 'rgba(245, 158, 11, 0.08)' }}>
+                    <div className="panel-eyebrow" style={{ color: 'rgb(146, 64, 14)' }}>Shared Contract Warning</div>
+                    <div className="panel-title" style={{ color: 'rgb(120, 53, 15)' }}>以下合同已经关联多个项目，但还有项目没填“工程阶段 / 子项”</div>
+                    <div className="panel-note" style={{ color: 'rgb(120, 53, 15)' }}>
+                        这些项目后面继续拆分时，列表里还会不好区分。建议先补齐子项，再继续做合同归并。
+                    </div>
+                    <div style={{ display: 'grid', gap: 10 }}>
+                        {sharedContractWarningGroups.map((group) => (
+                            <div key={group.contractId} style={{ borderRadius: 12, border: '1px solid rgba(217, 119, 6, 0.28)', background: 'rgba(255,255,255,0.72)', padding: 12 }}>
+                                <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                                    {group.contract ? getContractDisplayName(group.contract) : `合同 #${group.contractId}`}
+                                </div>
+                                <div className="panel-note" style={{ color: 'rgb(146, 64, 14)' }}>
+                                    未填写子项：{group.missingPhaseProjects.map((project) => getProjectOptionLabel(project)).join('、')}
+                                </div>
+                                <div className="panel-note">
+                                    当前同合同项目：{group.linkedProjects.map((project) => getProjectOptionLabel(project)).join('、')}
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            ) : null}
 
             <div className="page-body">
                 <div className="metric-grid">
@@ -378,8 +669,33 @@ export default function ProjectsPage() {
                                 </select>
                             </div>
                             <div className="form-group">
-                                <label>工程阶段</label>
-                                <input className="form-input" value={form.phase} onChange={(event) => setForm((current) => ({ ...current, phase: event.target.value }))} placeholder="例如：主体施工、竣工验收" />
+                                <label>工程阶段 / 子项</label>
+                                <input
+                                    className="form-input"
+                                    value={form.phase}
+                                    onChange={(event) => setForm((current) => ({ ...current, phase: event.target.value }))}
+                                    placeholder="例如：主体施工、宿舍楼、食堂改造"
+                                />
+                            </div>
+                            <div className="form-group">
+                                <label>单体建筑模式</label>
+                                <label style={{ display: 'flex', alignItems: 'center', gap: 10, minHeight: 40 }}>
+                                    <input
+                                        type="checkbox"
+                                        checked={Boolean(form.buildingMode)}
+                                        onChange={(event) => {
+                                            const checked = event.target.checked;
+                                            setForm((current) => ({
+                                                ...current,
+                                                buildingMode: checked,
+                                            }));
+                                        }}
+                                    />
+                                    <span>该项目下多栋单体共用同一套检测项目</span>
+                                </label>
+                                <div className="panel-note">
+                                    开启后，后续导入 `项目名（xxx）` 会自动归到这个项目，并把 `xxx` 当作单体建筑记录。
+                                </div>
                             </div>
                             <div className="form-group">
                                 <label>关联合同</label>
@@ -433,7 +749,7 @@ export default function ProjectsPage() {
                                         </th>
                                         <th>项目名称</th>
                                         <th>状态</th>
-                                        <th>工程阶段</th>
+                                        <th>阶段 / 子项</th>
                                         <th>关联合同</th>
                                         <th>操作</th>
                                     </tr>
@@ -450,10 +766,13 @@ export default function ProjectsPage() {
                                                         type="checkbox"
                                                         checked={isSelected}
                                                         onChange={() => handleToggleSelect(project.id)}
-                                                        aria-label={`选择项目 ${project.name}`}
+                                                        aria-label={`选择项目 ${getProjectOptionLabel(project)}`}
                                                     />
                                                 </td>
-                                                <td style={{ fontWeight: 600 }}><a href={`/master/projects/${project.id}`} onClick={(e) => { e.preventDefault(); router.push(`/master/projects/${project.id}`); }} style={{ color: 'inherit', textDecoration: 'none', cursor: 'pointer' }} onMouseEnter={(e) => { e.target.style.color = 'var(--color-accent)'; }} onMouseLeave={(e) => { e.target.style.color = 'inherit'; }}>{project.name}</a></td>
+                                                <td style={{ fontWeight: 600 }}>
+                                                    <a href={`/master/projects/${project.id}`} onClick={(e) => { e.preventDefault(); router.push(`/master/projects/${project.id}`); }} style={{ color: 'inherit', textDecoration: 'none', cursor: 'pointer' }} onMouseEnter={(e) => { e.target.style.color = 'var(--color-accent)'; }} onMouseLeave={(e) => { e.target.style.color = 'inherit'; }}>{getProjectOptionLabel(project)}</a>
+                                                    {project.buildingMode ? <span className="badge badge-info" style={{ marginLeft: 8 }}>单体</span> : null}
+                                                </td>
                                                 <td><span className={`badge ${getStatusBadge(project.normalizedStatus)}`}>{project.normalizedStatus}</span></td>
                                                 <td>{project.phase || '-'}</td>
                                                 <td>
@@ -462,11 +781,17 @@ export default function ProjectsPage() {
                                                             <select
                                                                 className="form-select"
                                                                 style={{ fontSize: '0.78rem', minHeight: 32, padding: '2px 8px', minWidth: 180 }}
-                                                                defaultValue={project.contractId ? String(project.contractId) : ''}
+                                                                value={Object.prototype.hasOwnProperty.call(linkingSelections, project.id)
+                                                                    ? linkingSelections[project.id]
+                                                                    : (project.contractId ? String(project.contractId) : '')}
                                                                 disabled={linkingSaving}
                                                                 onChange={(event) => {
                                                                     const value = event.target.value;
-                                                                    void handleLinkContract(project.id, value ? Number.parseInt(value, 10) : null);
+                                                                    setLinkingSelections((current) => ({
+                                                                        ...current,
+                                                                        [project.id]: value,
+                                                                    }));
+                                                                    void handleLinkContractSelection(project, value ? Number.parseInt(value, 10) : null);
                                                                 }}
                                                             >
                                                                 <option value="">不关联合同</option>
@@ -480,7 +805,7 @@ export default function ProjectsPage() {
                                                             <button
                                                                 type="button"
                                                                 style={{ fontSize: 11, padding: '2px 8px', borderRadius: 4, border: '1px solid var(--color-border)', background: 'var(--color-surface)', cursor: 'pointer', whiteSpace: 'nowrap' }}
-                                                                onClick={() => setLinkingProjectId(null)}
+                                                                onClick={() => closeLinkingProject(project.id)}
                                                             >
                                                                 取消
                                                             </button>
@@ -501,7 +826,7 @@ export default function ProjectsPage() {
                                                                 : (
                                                                     <button
                                                                         type="button"
-                                                                        onClick={() => setLinkingProjectId(project.id)}
+                                                                        onClick={() => openLinkingProject(project)}
                                                                         style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer' }}
                                                                         title="点击关联合同"
                                                                     >
@@ -512,7 +837,7 @@ export default function ProjectsPage() {
                                                             {project.contract && (
                                                                 <button
                                                                     type="button"
-                                                                    onClick={() => setLinkingProjectId(project.id)}
+                                                                    onClick={() => openLinkingProject(project)}
                                                                     style={{ fontSize: 11, padding: '2px 6px', borderRadius: 4, border: '1px solid var(--color-border)', background: 'var(--color-surface)', cursor: 'pointer', whiteSpace: 'nowrap', color: 'var(--color-muted)' }}
                                                                     title="更换合同关联"
                                                                 >
@@ -591,6 +916,104 @@ export default function ProjectsPage() {
 
                         <div className="page-actions" style={{ marginTop: 16 }}>
                             <button type="button" className="btn btn-secondary" onClick={() => setViewingContract(null)}>关闭</button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {sameContractDecision && (
+                <div
+                    style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(4px)' }}
+                    onClick={() => {
+                        if (!sameContractSubmitting) {
+                            closeSameContractDecision();
+                        }
+                    }}
+                >
+                    <div className="card stack" style={{ width: '90%', maxWidth: 680, padding: 24 }} onClick={(event) => event.stopPropagation()}>
+                        <div className="panel-eyebrow">Contract Decision</div>
+                        <div className="panel-title" style={{ marginBottom: 4 }}>这份合同已经关联了其他项目</div>
+                        <div className="panel-note" style={{ marginBottom: 16 }}>
+                            {(() => {
+                                const contract = contracts.find((item) => item.id === sameContractDecision.contractId)
+                                    || { id: sameContractDecision.contractId, contractNo: '', clientName: '', notes: '' };
+                                const linkedProjects = sameContractDecision.linkedProjectIds
+                                    .map((id) => projects.find((item) => item.id === id))
+                                    .filter(Boolean);
+
+                                return `合同“${getContractDisplayName(contract)}”目前已关联 ${linkedProjects.length} 个项目。请选择这次是直接并到已有项目里，还是保留成同合同下的不同子项。`;
+                            })()}
+                        </div>
+
+                        <div className="form-group">
+                            <label>处理方式</label>
+                            <div style={{ display: 'grid', gap: 12 }}>
+                                <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', border: '1px solid var(--color-border)', borderRadius: 12, padding: 14, cursor: 'pointer' }}>
+                                    <input type="radio" name="same-contract-mode" checked={sameContractMode === 'merge'} onChange={() => setSameContractMode('merge')} />
+                                    <div>
+                                        <div style={{ fontWeight: 600, marginBottom: 4 }}>合并为同一个项目</div>
+                                        <div className="panel-note">当前项目会并入你选中的目标项目，原项目会删除，原项目里的工作记录、检测记录和报告会一起转过去。</div>
+                                    </div>
+                                </label>
+                                <label style={{ display: 'flex', gap: 10, alignItems: 'flex-start', border: '1px solid var(--color-border)', borderRadius: 12, padding: 14, cursor: 'pointer' }}>
+                                    <input type="radio" name="same-contract-mode" checked={sameContractMode === 'subitem'} onChange={() => setSameContractMode('subitem')} />
+                                    <div>
+                                        <div style={{ fontWeight: 600, marginBottom: 4 }}>同一项目下的不同子项</div>
+                                        <div className="panel-note">当前项目继续保留，只是共用这份合同。后面可以用“工程阶段 / 子项”区分楼栋、单体或分项。</div>
+                                    </div>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div className="form-group">
+                            <label>已关联项目</label>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                                {sameContractDecision.linkedProjectIds.map((id) => {
+                                    const project = projects.find((item) => item.id === id);
+                                    return project ? (
+                                        <span key={id} className="badge badge-info" style={{ fontSize: '0.78rem' }}>
+                                            {getProjectOptionLabel(project)}
+                                        </span>
+                                    ) : null;
+                                })}
+                            </div>
+                        </div>
+
+                        {sameContractMode === 'merge' ? (
+                            <div className="form-group">
+                                <label>要保留的项目</label>
+                                <select className="form-select" value={sameContractTargetId} onChange={(event) => setSameContractTargetId(event.target.value)}>
+                                    <option value="">请选择...</option>
+                                    {sameContractDecision.linkedProjectIds.map((id) => {
+                                        const project = projects.find((item) => item.id === id);
+                                        return project ? <option key={id} value={id}>{getProjectOptionLabel(project)}</option> : null;
+                                    })}
+                                </select>
+                            </div>
+                        ) : (
+                            <div style={{ display: 'grid', gap: 12 }}>
+                                <div className="panel-note">
+                                    当前项目会保留成一条独立项目台账。如果你本来就是想把同一合同下的多个楼栋、单体或分项分开记，这个选项更合适。
+                                </div>
+                                <div className="form-group" style={{ marginBottom: 0 }}>
+                                    <label>工程阶段 / 子项</label>
+                                    <input
+                                        className="form-input"
+                                        placeholder="例如：污水处理用房、1#楼、主体结构"
+                                        value={sameContractPhase}
+                                        onChange={(event) => setSameContractPhase(event.target.value)}
+                                        disabled={sameContractSubmitting}
+                                    />
+                                    <div className="panel-note">建议现在就填，保存后列表里会直接按这个子项显示。</div>
+                                </div>
+                            </div>
+                        )}
+
+                        <div className="page-actions" style={{ marginTop: 20 }}>
+                            <button type="button" className="btn btn-secondary" onClick={() => closeSameContractDecision()} disabled={sameContractSubmitting}>取消</button>
+                            <button type="button" className="btn btn-primary" onClick={() => void handleConfirmSameContractDecision()} disabled={sameContractSubmitting || (sameContractMode === 'merge' && !sameContractTargetId)}>
+                                {sameContractSubmitting ? '处理中...' : '确认'}
+                            </button>
                         </div>
                     </div>
                 </div>

@@ -1,4 +1,8 @@
 import prisma from '@/lib/prisma';
+import {
+    buildWorkLogProjectDisplayName,
+    findOrCreateProjectByDisplayName,
+} from '@/lib/projectResolver';
 import { calculateProductionValue } from '@/lib/productionCalculator';
 import { syncDetectionRecordFromWorkLog } from '@/lib/detectionRecordSync';
 import { normalizeAllocationShare } from '@/lib/worklogBilling';
@@ -12,20 +16,6 @@ function parseOptionalFloat(value) {
 
     const numeric = Number.parseFloat(value);
     return Number.isFinite(numeric) ? numeric : null;
-}
-
-async function findOrCreateProject(projectName, fallbackProjectId = null) {
-    if (!projectName) {
-        return fallbackProjectId
-            ? prisma.project.findUnique({ where: { id: fallbackProjectId } })
-            : null;
-    }
-
-    let project = await prisma.project.findFirst({ where: { name: projectName } });
-    if (!project) {
-        project = await prisma.project.create({ data: { name: projectName } });
-    }
-    return project;
 }
 
 async function resolveStaffIds(staffNames = []) {
@@ -53,6 +43,7 @@ function buildPendingAllocationPayload(log, calculation) {
 
     return {
         ...calculation.pendingAllocation,
+        projectName: buildWorkLogProjectDisplayName(log),
         staffNames: (log.staffMembers || []).map((item) => item.staff?.name).filter(Boolean),
     };
 }
@@ -84,12 +75,13 @@ export async function PUT(request, { params }) {
         const data = await request.json();
         const nextProjectName = typeof data.projectName === 'string'
             ? data.projectName
-            : (existingLog.project?.name || '');
+            : buildWorkLogProjectDisplayName(existingLog);
         const nextStaffNames = Array.isArray(data.staffNames)
             ? data.staffNames
             : existingLog.staffMembers.map((item) => item.staff?.name).filter(Boolean);
 
-        const project = await findOrCreateProject(nextProjectName, existingLog.projectId);
+        const resolvedProject = await findOrCreateProjectByDisplayName(nextProjectName, existingLog.projectId, prisma);
+        const project = resolvedProject.project;
         const staffIds = await resolveStaffIds(nextStaffNames);
         const allocationShare = Object.prototype.hasOwnProperty.call(data, 'allocationShare')
             ? normalizeAllocationShare(data.allocationShare)
@@ -106,6 +98,7 @@ export async function PUT(request, { params }) {
             data: {
                 workDate: data.workDate ? new Date(data.workDate) : existingLog.workDate,
                 projectId: project?.id || null,
+                buildingName: resolvedProject.buildingName,
                 testContent: data.testContent ?? existingLog.testContent,
                 quantity: data.quantity !== undefined ? (Number.parseFloat(data.quantity) || 0) : existingLog.quantity,
                 unit: data.unit !== undefined ? (data.unit || null) : existingLog.unit,
@@ -136,6 +129,7 @@ export async function PUT(request, { params }) {
         const calculation = await calculateProductionValue(
             {
                 ...updatedLog,
+                buildingName: resolvedProject.buildingName,
                 project,
             },
             staffIds,
