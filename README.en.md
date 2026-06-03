@@ -1,6 +1,10 @@
+<div align="center">
+
 # Engineering Third-Party Testing Project Management System
 
-Language: English | [中文](README.zh-CN.md)
+[简体中文](README.md) | **English**
+
+</div>
 
 This is an internal management system for engineering third-party testing teams. It connects daily work logs, contracts, projects, staff members, and production value reporting in one workflow.
 
