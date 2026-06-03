@@ -96,7 +96,8 @@
   "status": "进行中",
   "phase": "主体施工",
   "contractId": 3,
-  "buildingMode": false
+  "buildingMode": false,
+  "noContractExpected": false
 }
 ```
 
@@ -104,6 +105,7 @@
 
 - `buildingMode=true` 时，`phase` 必须为空
 - 开启后，该项目会吸收 `项目名（单体名）` 这种工作记录写法，并把括号内容记到工作记录的 `buildingName`
+- `noContractExpected=true` 表示该项目本来就不需要合同；如果已经填了 `contractId`，则不能同时设为 `true`
 
 ### `PUT /api/projects`
 
@@ -122,7 +124,8 @@
   "status": "进行中",
   "phase": "主体施工",
   "contractId": 3,
-  "buildingMode": false
+  "buildingMode": false,
+  "noContractExpected": false
 }
 ```
 
@@ -130,6 +133,11 @@
 
 - 更新后的项目对象
 - 首次绑定合同场景下，额外返回 `retroactiveResult`
+
+说明：
+
+- `noContractExpected` 不传时，保持原值
+- 如果这次把项目关联合同，系统会自动把 `noContractExpected` 清成 `false`
 
 ### `DELETE /api/projects`
 
@@ -172,10 +180,47 @@
 - `workLogs[].buildingName`
 - `detectionRecords`
 - `detectionRecords[].isEdited`
+- `repairNeeded`
+- `missingDetectionRecordCount`
 - `siblingProjects`：当前项目如果已关联合同，会一并返回同合同下的全部项目组
 - `siblingProjects[]._count.workLogs`
 - `siblingProjects[].workLogs`
 - `siblingProjects[].workLogs[].staffMembers`
+
+> 说明：`GET /api/projects/[id]` 现在只返回“是否需要修复”的提示，不再在读取详情时自动补写缺失检测明细。
+
+### `PUT /api/projects/[id]`
+
+用途：
+
+- 只更新当前项目的“无需合同”标记
+- 勾选后，当前项目下的无合同工作记录会从 E7 收件箱自动消失
+
+请求体示例：
+
+```json
+{
+  "noContractExpected": true
+}
+```
+
+说明：
+
+- 这个接口只接受 `noContractExpected`
+- 已关联合同的项目不能标记为 `true`
+
+### `POST /api/projects/[id]/repair-inspections`
+
+用途：
+
+- 手动补齐当前项目下缺失的检测明细
+- 只补缺失项，已有检测明细的工作记录会跳过
+- 可重复调用；重复调用时 `repairedCount` 会回到 `0`
+
+返回字段重点：
+- `success`
+- `repairedCount`
+- `skippedCount`
 
 ## 4. 项目检测记录 `/api/projects/[id]/detection-records`
 
@@ -232,19 +277,20 @@
 用途：
 
 - 批量整理同一份合同下的项目组
-- 一次性统一大项目名称
-- 一次性保存每个子项的 `phase`
+- 支持三种角色操作：保留独立子项（开启/不开启单体模式）、合并入其他项目、作为单体挂在其他项目下
+- 自动处理合并时的工作记录、检测记录与报告转移
 
 请求体示例：
 
 ```json
 {
   "contractId": 14,
-  "parentName": "云南省洱海流域山水林田湖草沙一体化保护和修复工程",
+  "parentName": "云南省洱海保护工程",
   "projects": [
-    { "id": 814, "phase": "一标段-弥茨河等4条河流水生态修复" },
-    { "id": 825, "phase": "洱海东部面山林草生态修复" },
-    { "id": 828, "phase": "四标段-苍山生物多样性保护" }
+    { "id": 811, "role": "subproject", "phase": "一二期" },
+    { "id": 836, "role": "merge-into", "mergeTargetId": 811 },
+    { "id": 837, "role": "building-under", "buildingParentId": 811, "buildingName": "1#管理房" },
+    { "id": 838, "role": "building-mode-self", "phase": null }
   ]
 }
 ```
@@ -533,17 +579,76 @@
 用途：
 
 - 导入工作日志
+- 支持“先预览、再确认”的两阶段导入
 
 支持两种提交方式：
 
 - `application/json`：传 `rawText`
 - `multipart/form-data`：传 Excel 文件，字段名 `file`
 
+`mode` 说明：
+
+- 不传：保持旧行为，直接导入；缺失项目会自动创建
+- `preview`：只解析、不落库；返回每条记录的项目匹配结果
+- `commit`：按用户确认后的 `rowAssignments` 落库
+
+`preview` 阶段可用两种输入：
+
+- 继续传 `rawText`
+- 或直接传已经整理好的 `rows` 数组（前端预览确认时就是走这个）
+
 JSON 请求体示例：
 
 ```json
 {
   "rawText": "2026/03/10\t某项目\t沉降观测\t26点\t张三、李四\t3#楼"
+}
+```
+
+`mode=preview` 请求体示例：
+
+```json
+{
+  "mode": "preview",
+  "source": "preview",
+  "originalRows": 1,
+  "rows": [
+    {
+      "rowIndex": 1,
+      "workDate": "2026-04-16",
+      "projectName": "弥渡县城西片区老旧小区改造建设项目-建宁路西段建设工程",
+      "testContent": "轻型动力触探",
+      "quantity": 10,
+      "unit": "点",
+      "staffNames": [],
+      "remarks": "预览测试"
+    }
+  ]
+}
+```
+
+`mode=commit` 请求体示例：
+
+```json
+{
+  "mode": "commit",
+  "source": "preview",
+  "originalRows": 1,
+  "rows": [
+    {
+      "rowIndex": 1,
+      "workDate": "2026-04-16",
+      "projectName": "弥渡县城西片区老旧小区改造建设项目-建宁路西段建设工程",
+      "testContent": "轻型动力触探",
+      "quantity": 10,
+      "unit": "点",
+      "staffNames": [],
+      "remarks": "确认导入测试"
+    }
+  ],
+  "rowAssignments": [
+    { "rowIndex": 1, "decision": "use-existing", "projectId": 815 }
+  ]
 }
 ```
 
@@ -559,11 +664,33 @@ JSON 请求体示例：
 - `pendingAllocations`
 - `errors`
 
+`mode=preview` 额外返回：
+
+- `mode`
+- `statusCounts`
+- `projectOptions`
+- `rows[].resolution.status`：`exact | fuzzy | none`
+- `rows[].resolution.exactProjectId`
+- `rows[].resolution.candidates[]`
+- `rows[].resolution.candidates[].projectId`
+- `rows[].resolution.candidates[].projectDisplayName`
+- `rows[].resolution.candidates[].score`
+- `rows[].resolution.candidates[].matchedAs`
+- `rows[].resolution.candidates[].buildingName`
+
+`rowAssignments` 支持的决策：
+
+- `use-existing`：落到指定已有项目
+- `use-existing-as-building`：落到指定单体建筑模式项目，并写入 `buildingName`
+- `create-new`：按 `projectName` 新建项目后再导入
+
 说明：
 
 - 导入时会自动创建缺失的项目和人员
 - 保存后立即尝试计算产值
-- 面积合同和包干价合同如果缺少占比，会通过 `pendingAllocations` 返回待补项目
+- 面积合同、包干价合同，以及已配置 `lumpSumAmount` 的 mixed 合同如果缺少占比，会通过 `pendingAllocations` 返回待补项目
+- mixed 合同如果没有配置 `lumpSumAmount`，即使 `allocationShare` 为空也仍按单价逻辑处理，不会强制进入待补占比队列
+- 当导入名与已有项目完全相同，但库里还存在其它近似同名项目时，`mode=preview` 会故意返回 `fuzzy`，让用户手动确认，避免再误挂到错误台账
 
 ### `DELETE /api/worklog`
 
@@ -626,17 +753,24 @@ JSON 请求体示例：
 - `calculation`
 - `pendingAllocation`
 
+说明：
+
+- `allocationShare` 同时接受百分比写法（如 `35`）和小数写法（如 `0.35`）
+- `manualTotalValue > 0` 时，优先按手工产值计算
+- `area / lumpsum` 合同填写 `allocationShare` 后会直接按占比折算
+- `mixed` 合同只有在合同配置了 `lumpSumAmount > 0` 时才会按 `allocationShare` 走打包部分分摊；否则仍走原来的单价逻辑
+
 ### `POST /api/worklog/[id]/split`
 
 用途：
 
-- 把一条工作日志拆成“原记录剩余数量 + 新增一条拆出记录”
-- 原记录会清空已确认占比、手工产值后重新计算
-- 新记录会继承日期/项目/人员等信息，也会同步生成检测记录
+- 保留原记录不动，复制出一条新的工作记录副本
+- 新记录默认继承原记录的日期、项目、检测内容、数量、单位、人员、备注
+- 新记录的占比和手工产值会清空，保存后重新计算并同步生成检测记录
 
 请求体常用字段：
 
-- `splitQuantity`
+- `quantity`
 - `workDate`
 - `projectName`
 - `testContent`
@@ -648,7 +782,7 @@ JSON 请求体示例：
 
 ```json
 {
-  "splitQuantity": 8,
+  "quantity": 8,
   "workDate": "2026-04-13",
   "projectName": "某项目",
   "testContent": "保温层构造厚度",
@@ -663,6 +797,15 @@ JSON 请求体示例：
 - `originalLog`
 - `splitLog`
 - `pendingAllocations`
+
+说明：
+
+- `quantity` 可选；不传时默认复制原记录的数量
+- 旧字段 `splitQuantity` 仍兼容，但语义等同于 `quantity`
+- 允许 `quantity = 0`
+- 不再限制新记录数量必须小于原记录数量
+- 原记录的 `quantity / allocationShare / manualTotalValue / productionValues` 不会因为这次复制被修改
+- `area / mixed / lumpsum` 合同下，如果原记录或新副本还没确认占比，响应里的 `pendingAllocations` 会把这些记录带回前端继续处理
 
 ### `DELETE /api/worklog/[id]`
 
@@ -957,7 +1100,211 @@ JSON 请求体示例：
 - 测试模型接口连通性
 - 可测试已保存模型，也可测试当前表单中的未保存模型
 
-## 15. 设计注意点
+## 15. 异常收件箱 `/api/inbox/*`
+
+### `GET /api/inbox/exceptions`
+
+用途：
+
+- 读取异常收件箱列表
+- 返回各异常分类当前未处理数量
+
+常用查询参数：
+
+- `type`：异常类型；可传 `invalid-quantity`、`missing-staff`、`no-price-match`、`pending-area-share`、`contract-incomplete`、`workload-only`、`fuzzy-project-duplicate`、`exceeded`
+- `projectId`：按项目过滤
+- `page`：页码
+- `pageSize`：每页条数
+
+返回结果要点：
+
+- `counts`：各分类数量，含 `total`
+- `items`：当前页记录
+- `total` / `page` / `pageSize`
+
+`items` 常用字段：
+
+- `itemType`：`worklog` 或 `project-fuzzy-match`
+- `workLogId`
+- `workDate`
+- `projectId`
+- `projectName`
+- `contractId`
+- `contractNo`
+- `pricingMode`
+- `testContent`
+- `quantity`
+- `unit`
+- `staffNames`
+- `exceptions`
+- `allocationShare`
+- `allocationSharePercent`
+- `manualTotalValue`
+- `contractSummary`
+
+当 `itemType=project-fuzzy-match` 时，常用字段改为：
+
+- `projectId`
+- `projectName`
+- `projectStatus`
+- `phase`
+- `buildingMode`
+- `contractId`
+- `contractNo`
+- `projectCreatedAt`
+- `fuzzyMatchedAt`
+- `candidateProjectIds`
+- `candidateProjects[]`
+
+### `POST /api/inbox/acknowledge`
+
+用途：
+
+- 把某条异常标记为“已知忽略”
+- 对 `exceeded`（E9）来说，语义不是“忽略错误”，而是“接受当前 cap 后的截断结果，不再提醒”
+
+请求体示例：
+
+```json
+{
+  "workLogId": 5279,
+  "exceptionType": "no-price-match"
+}
+```
+
+补充说明：
+
+- `exceptionType` 也可以传 `exceeded`
+- 当 `exceptionType=exceeded` 时，工作记录会继续保留当前 cap 后的产值，只是从异常收件箱里消失
+- E8 `fuzzy-project-duplicate` 不走这个接口；项目疑似重名要用专门的确认/合并接口
+
+### `POST /api/inbox/reset-acknowledgement`
+
+用途：
+
+- 取消某条异常的“已知忽略”
+
+请求体示例：
+
+```json
+{
+  "workLogId": 5279,
+  "exceptionType": "no-price-match"
+}
+```
+
+补充说明：
+
+- E8 `fuzzy-project-duplicate` 不走这个接口；它不是 worklog 的“忽略/取消忽略”模型
+
+### `POST /api/inbox/fuzzy-match/confirm`
+
+用途：
+
+- 把一条 E8“项目疑似重名”记录标记为“确认保持独立”
+- 标记后这条项目会从 E8 收件箱消失
+
+请求体示例：
+
+```json
+{
+  "projectId": 812
+}
+```
+
+返回字段重点：
+
+- `success`
+- `projectId`
+- `fuzzyMatchStatus`：固定为 `confirmed-distinct`
+
+### `POST /api/inbox/fuzzy-match/merge`
+
+用途：
+
+- 把一条 E8“项目疑似重名”记录并入候选项目
+- 只允许并到当前候选列表里的目标项目
+- 底层复用现有项目合并逻辑，会迁移工作记录、检测记录、报告，并删除来源项目
+
+请求体示例：
+
+```json
+{
+  "projectId": 812,
+  "targetProjectId": 811
+}
+```
+
+返回字段重点：
+
+- `success`
+- `targetProjectId`
+- `targetProject`
+- `movedWorkLogs`
+- `movedDetectionRecords`
+- `movedTestReports`
+- `deletedProjects`
+
+### `POST /api/inbox/batch-allocate`
+
+用途：
+
+- 批量给 E5“缺占比”记录写入占比
+- 接口只接受同一合同下的一组记录；跨合同会直接报错
+
+请求体示例：
+
+```json
+{
+  "items": [
+    { "workLogId": 5436, "allocationShare": 0.333334 },
+    { "workLogId": 5435, "allocationShare": 0.333333 },
+    { "workLogId": 5434, "allocationShare": 0.333333 }
+  ]
+}
+```
+
+返回结果要点：
+
+- `ok`
+- `updatedCount`
+- `items`：每条记录的更新结果
+
+## 16. 手动触发项目判重 `/api/internal/*`
+
+### `POST /api/internal/run-fuzzy-match`
+
+用途：
+
+- 手动触发一条或多条项目的后台判重
+- 主要用于排查和复验；正常用户流程还是以项目保存后的异步扫描为主
+
+请求体示例：
+
+```json
+{
+  "projectId": 812
+}
+```
+
+```json
+{
+  "projectIds": [812, 813],
+  "limit": 6,
+  "threshold": 0.72
+}
+```
+
+返回字段重点：
+
+- `success`
+- `results[]`
+- `results[].projectId`
+- `results[].status`：可能为 `pending-review`、`distinct`、`error`、`missing`
+- `results[].candidateIds`
+- `results[].reason`
+
+## 17. 设计注意点
 
 - 所有接口都是当前页面的内部后端，不是对外开放 API
 - 目前没有版本号

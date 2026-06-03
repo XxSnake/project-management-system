@@ -1,6 +1,7 @@
 import prisma from '@/lib/prisma';
 import { buildProjectDisplayName } from '@/lib/projectDisplayName';
 import { retroactiveCalculation } from '@/lib/productionCalculator';
+import { scheduleProjectFuzzyMatch } from '@/lib/projectFuzzyMatchScheduler';
 import {
     isLikelyCorruptedProjectName,
     resolveProjectNameRepairCandidate,
@@ -13,6 +14,27 @@ function normalizeBuildingMode(value, fallback = false) {
     }
 
     return value === true || value === 'true' || value === 1 || value === '1';
+}
+
+function normalizeNoContractExpected(value, fallback = false) {
+    if (value === undefined) {
+        return fallback;
+    }
+
+    return value === true || value === 'true' || value === 1 || value === '1';
+}
+
+function shouldScheduleFuzzyMatch(oldProject, nextProject) {
+    if (!oldProject) {
+        return true;
+    }
+
+    return (
+        oldProject.name !== nextProject.name
+        || (oldProject.phase ?? null) !== (nextProject.phase ?? null)
+        || Boolean(oldProject.buildingMode) !== Boolean(nextProject.buildingMode)
+        || Number(oldProject.contractId || 0) !== Number(nextProject.contractId || 0)
+    );
 }
 
 export async function GET() {
@@ -34,7 +56,12 @@ export async function POST(request) {
     const trimmedName = String(data.name).trim();
     const trimmedPhase = data.phase ? String(data.phase).trim() : null;
     const buildingMode = normalizeBuildingMode(data.buildingMode);
-    // Removed phase check for buildingMode
+    const contractId = data.contractId || null;
+    const noContractExpected = normalizeNoContractExpected(data.noContractExpected);
+
+    if (contractId && noContractExpected) {
+        return NextResponse.json({ error: '已关联合同的项目不能标记为无需合同' }, { status: 400 });
+    }
 
     const duplicate = await prisma.project.findFirst({
         where: {
@@ -52,10 +79,12 @@ export async function POST(request) {
             status: data.status || '进行中',
             phase: trimmedPhase,
             buildingMode,
-            contractId: data.contractId || null,
+            contractId,
+            noContractExpected,
         },
     });
 
+    scheduleProjectFuzzyMatch(project.id);
     return NextResponse.json(project);
 }
 
@@ -70,9 +99,12 @@ export async function PUT(request) {
     const oldProject = await prisma.project.findUnique({
         where: { id: projectId },
         select: {
+            id: true,
             name: true,
+            phase: true,
             contractId: true,
             buildingMode: true,
+            noContractExpected: true,
         },
     });
 
@@ -106,7 +138,13 @@ export async function PUT(request) {
         data.buildingMode,
         Boolean(oldProject.buildingMode),
     );
-    // Removed phase check for buildingMode
+    const nextNoContractExpected = Object.prototype.hasOwnProperty.call(data, 'noContractExpected')
+        ? normalizeNoContractExpected(data.noContractExpected, Boolean(oldProject.noContractExpected))
+        : (newContractId ? false : Boolean(oldProject.noContractExpected));
+
+    if (newContractId && nextNoContractExpected) {
+        return NextResponse.json({ error: '已关联合同的项目不能标记为无需合同' }, { status: 400 });
+    }
 
     const duplicate = await prisma.project.findFirst({
         where: {
@@ -127,6 +165,7 @@ export async function PUT(request) {
         phase: nextPhase,
         buildingMode: nextBuildingMode,
         contractId: newContractId,
+        noContractExpected: nextNoContractExpected,
     };
 
     if (isNewContractLink) {
@@ -138,6 +177,10 @@ export async function PUT(request) {
         data: updateData,
         include: { contract: true },
     });
+
+    if (shouldScheduleFuzzyMatch(oldProject, project)) {
+        scheduleProjectFuzzyMatch(projectId);
+    }
 
     let retroResult = null;
     if (isNewContractLink) {

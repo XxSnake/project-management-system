@@ -41,6 +41,10 @@ model Project {
   status           String       @default("进行中")
   phase            String?
   buildingMode     Boolean      @default(false)
+  noContractExpected Boolean    @default(false)
+  fuzzyMatchStatus String?
+  fuzzyMatchCandidateIds String?
+  fuzzyMatchedAt   DateTime?
   contractId       Int?
   contract         Contract?    @relation(fields: [contractId], references: [id])
   contractLinkedAt DateTime?
@@ -109,6 +113,7 @@ model WorkLog {
   allocationShare  Float?
   manualTotalValue Float?
   manualValueNote  String?
+  acknowledgedExceptions String?
   createdAt        DateTime          @default(now())
   staffMembers     WorkLogStaff[]
   productionValues ProductionValue[]

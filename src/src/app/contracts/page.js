@@ -2,6 +2,7 @@
 
 import { Suspense, useCallback, useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
+import ContractDetailModal from '@/components/ContractDetailModal';
 import { buildProjectDisplayName } from '@/lib/projectDisplayName';
 
 const EMPTY_FORM = {
@@ -70,6 +71,8 @@ function ContractsPage() {
     const [uploading, setUploading] = useState(false);
     const [saving, setSaving] = useState(false);
     const [editingId, setEditingId] = useState(null);
+    const [viewingContract, setViewingContract] = useState(null);
+    const [savingDetailItems, setSavingDetailItems] = useState(false);
     const [sameContractDecision, setSameContractDecision] = useState(null);
     const [sameContractMode, setSameContractMode] = useState('subitem');
     const [sameContractTargetId, setSameContractTargetId] = useState('');
@@ -99,11 +102,11 @@ function ContractsPage() {
         setSameContractPhase('');
     };
 
-    const buildPriceItemsPayload = () => form.priceItems
-        .filter((p) => p.testItemName)
+    const buildPriceItemsPayload = (items = form.priceItems) => items
+        .filter((p) => String(p.testItemName || '').trim())
         .map((p) => ({
             testCategory: p.testCategory || null,
-            testItemName: p.testItemName,
+            testItemName: String(p.testItemName).trim(),
             quantity: p.quantity === '' ? null : Number(p.quantity),
             unit: p.unit || null,
             unitPrice: p.unitPrice === '' ? 0 : Number(p.unitPrice),
@@ -434,6 +437,52 @@ function ContractsPage() {
         await loadData();
     };
 
+    const handleSaveContractPriceItems = async (draftItems) => {
+        if (!viewingContract) {
+            return false;
+        }
+
+        setSavingDetailItems(true);
+        try {
+            const response = await fetch('/api/contracts', {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    id: viewingContract.id,
+                    priceItems: buildPriceItemsPayload(draftItems),
+                }),
+            });
+            const data = await response.json();
+
+            if (!response.ok) {
+                alert(data.error || '保存价目表失败');
+                return false;
+            }
+
+            const recalculatedProjects = Array.isArray(data.recalculationResults) ? data.recalculationResults.length : 0;
+            alert(`合同价目表已更新${recalculatedProjects > 0 ? `，并重算了 ${recalculatedProjects} 个关联项目` : ''}`);
+            setViewingContract(null);
+            await loadData();
+            return true;
+        } finally {
+            setSavingDetailItems(false);
+        }
+    };
+
+    const handleOpenContractDetail = (contract) => {
+        setViewingContract(contract);
+    };
+
+    const handleOpenContractEditFromDetail = () => {
+        if (!viewingContract) {
+            return;
+        }
+
+        const contract = viewingContract;
+        setViewingContract(null);
+        handleEdit(contract);
+    };
+
     const editableProjectOptions = projects.filter((project) => (
         !project.contractId
         || project.contractId === editingId
@@ -651,8 +700,35 @@ function ContractsPage() {
                                     <tr key={c.id}>
                                         <td>{c.contractNo || '-'}</td>
                                         <td>{c.clientName || '-'}</td>
-                                        <td>{extractProjectNameFromNotes(c.notes) || '-'}</td>
-                                        <td>{(c.projects || []).map((p) => getProjectOptionLabel(p)).join('、') || '-'}</td>
+                                        <td>
+                                            <button
+                                                type="button"
+                                                onClick={() => handleOpenContractDetail(c)}
+                                                style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'var(--color-primary)', textDecoration: 'underline', font: 'inherit', textAlign: 'left' }}
+                                                title="点击查看合同详情"
+                                            >
+                                                {extractProjectNameFromNotes(c.notes) || '-'}
+                                            </button>
+                                        </td>
+                                        <td>
+                                            {(c.projects || []).length > 0 ? (
+                                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                                                    {(c.projects || []).map((project) => (
+                                                        <button
+                                                            key={project.id}
+                                                            type="button"
+                                                            onClick={() => handleOpenContractDetail(c)}
+                                                            style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', color: 'var(--color-primary)', textDecoration: 'underline', font: 'inherit' }}
+                                                            title="点击查看合同详情"
+                                                        >
+                                                            {getProjectOptionLabel(project)}
+                                                        </button>
+                                                    ))}
+                                                </div>
+                                            ) : (
+                                                '-'
+                                            )}
+                                        </td>
                                         <td>{formatContractAmount(c)}</td>
                                         <td>
                                             <div className="page-actions">
@@ -667,6 +743,17 @@ function ContractsPage() {
                     </div>
                 </section>
             </div>
+
+            {viewingContract ? (
+                <ContractDetailModal
+                    contract={viewingContract}
+                    onClose={() => setViewingContract(null)}
+                    editable
+                    saving={savingDetailItems}
+                    onSavePriceItems={handleSaveContractPriceItems}
+                    onEditContract={handleOpenContractEditFromDetail}
+                />
+            ) : null}
 
             {sameContractDecision && (
                 <div

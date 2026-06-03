@@ -5,6 +5,7 @@ import {
     fetchReportLogs,
     fetchTestReports,
 } from '@/lib/reportAggregation';
+import { buildProjectDisplayName } from '@/lib/projectDisplayName';
 
 import { NextResponse } from 'next/server';
 import * as XLSX from 'xlsx';
@@ -20,7 +21,7 @@ function buildProjectMatrixRows(logs) {
 
     logs.forEach((log) => {
         const projectId = log.project?.id || 0;
-        const projectName = log.project?.name || '未绑定项目';
+        const projectName = buildProjectDisplayName(log.project) || '未绑定项目';
         const totalValue = (log.productionValues || []).reduce((sum, item) => sum + Number(item.value || 0), 0);
 
         if (!map.has(projectId)) {

@@ -4,7 +4,7 @@ import { applyProductionCap } from '@/lib/productionCap';
 import { isNonBillableLayoutWork } from '@/lib/worklogClassification';
 import prisma from '@/lib/prisma';
 
-async function resolveProjectWithContract(workLog) {
+async function resolveProjectWithContract(workLog, tx = prisma) {
     if (workLog?.project?.contract !== undefined) {
         return workLog.project;
     }
@@ -14,7 +14,7 @@ async function resolveProjectWithContract(workLog) {
         return null;
     }
 
-    return prisma.project.findUnique({
+    return tx.project.findUnique({
         where: { id: projectId },
         include: {
             contract: true,
@@ -23,6 +23,11 @@ async function resolveProjectWithContract(workLog) {
 }
 
 function buildPendingAllocation(workLog, contract, allocationShare = null) {
+    const pricingMode = normalizePricingMode(contract?.pricingMode);
+    const contractAmount = pricingMode === 'area'
+        ? (Number.parseFloat(contract.areaPricingAmount) || 0)
+        : (Number.parseFloat(contract.lumpSumAmount) || Number.parseFloat(contract.areaPricingAmount) || 0);
+
     return {
         workLogId: workLog.id,
         contractId: contract.id,
@@ -34,10 +39,17 @@ function buildPendingAllocation(workLog, contract, allocationShare = null) {
         quantity: Number.parseFloat(workLog.quantity) || 0,
         unit: workLog.unit || '',
         remarks: workLog.remarks || '',
+        pricingMode,
         allocationShare,
-        contractAmount: Number.parseFloat(contract.areaPricingAmount) || 0,
-        contractArea: Number.parseFloat(contract.areaPricingArea) || null,
+        contractAmount,
+        contractArea: pricingMode === 'area'
+            ? (Number.parseFloat(contract.areaPricingArea) || null)
+            : null,
     };
+}
+
+function formatAllocationSharePercent(allocationShare) {
+    return (allocationShare * 100).toFixed(2).replace(/\.?0+$/u, '');
 }
 
 /**
@@ -53,7 +65,9 @@ async function createProductionValues({
     workloadShare = null,
     project = null,
     contract = null,
-}) {
+    capMode = null,
+}, options = {}) {
+    const { tx = prisma } = options;
     const quantity = Number.parseFloat(workLog.quantity) || 0;
     const projectId = project?.id || workLog.projectId || workLog.project?.id || null;
 
@@ -63,12 +77,13 @@ async function createProductionValues({
         contract,
         newTotalValue: totalValue,
         excludeWorkLogId: workLog.id,
-    });
+        capMode,
+    }, { tx });
 
     const perPerson = staffIds.length > 0 ? cappedValue / staffIds.length : 0;
 
     for (const staffId of staffIds) {
-        await prisma.productionValue.create({
+        await tx.productionValue.create({
             data: {
                 workLogId: workLog.id,
                 staffId,
@@ -102,7 +117,9 @@ async function createProductionValues({
  *   C (manual) - 已签合同（面积合同），用户手动输入产值
  *   无合同     - 仅记工作量，可手动输入产值
  */
-export async function calculateProductionValue(workLog, staffIds) {
+export async function calculateProductionValue(workLog, staffIds, options = {}) {
+    const { tx = prisma } = options;
+
     if (!Array.isArray(staffIds) || staffIds.length === 0) {
         return { status: 'no-staff' };
     }
@@ -120,7 +137,7 @@ export async function calculateProductionValue(workLog, staffIds) {
         };
     }
 
-    const project = await resolveProjectWithContract(workLog);
+    const project = await resolveProjectWithContract(workLog, tx);
     const contract = project?.contract || null;
     const pricingMode = normalizePricingMode(contract?.pricingMode);
     const hasContract = Boolean(contract?.id);
@@ -143,7 +160,7 @@ export async function calculateProductionValue(workLog, staffIds) {
             workloadShare: normalizeAllocationShare(workLog?.allocationShare),
             project,
             contract,
-        });
+        }, { tx });
     }
 
     // ═══════════════════════════════════════════════════
@@ -181,7 +198,7 @@ export async function calculateProductionValue(workLog, staffIds) {
             workloadShare: allocationShare,
             project,
             contract,
-        });
+        }, { tx });
     }
 
     // ═══════════════════════════════════════════════════
@@ -220,13 +237,33 @@ export async function calculateProductionValue(workLog, staffIds) {
             workloadShare: allocationShare,
             project,
             contract,
-        });
+        }, { tx });
     }
 
     // ═══════════════════════════════════════════════════
     // 方案A：单价合同按单价×数量计算
     // ═══════════════════════════════════════════════════
-    if (hasContract && (pricingMode === 'unit' || pricingMode === 'mixed')) {
+    if (pricingMode === 'mixed' && hasContract) {
+        const allocationShare = normalizeAllocationShare(workLog?.allocationShare);
+        const lumpSumAmount = Number.parseFloat(contract.lumpSumAmount);
+
+        if (allocationShare !== null && Number.isFinite(lumpSumAmount) && lumpSumAmount > 0) {
+            const totalValue = lumpSumAmount * allocationShare;
+
+            return createProductionValues({
+                workLog,
+                staffIds,
+                totalValue,
+                unitPriceUsed: lumpSumAmount,
+                priceSource: `混合计费打包部分占比 ${formatAllocationSharePercent(allocationShare)}%`,
+                calculationMode: 'allocation-share',
+                workloadShare: allocationShare,
+                project,
+                contract,
+                capMode: 'mixed-allocation-share',
+            }, { tx });
+        }
+
         const matchedPrice = await findBestPriceMatch({
             ...workLog,
             project,
@@ -248,7 +285,32 @@ export async function calculateProductionValue(workLog, staffIds) {
             calculationMode: 'unit',
             project,
             contract,
+        }, { tx });
+    }
+
+    if (hasContract && pricingMode === 'unit') {
+        const matchedPrice = await findBestPriceMatch({
+            ...workLog,
+            project,
+            projectId: project?.id || workLog.projectId || null,
         });
+
+        if (!matchedPrice) {
+            return { status: 'no-price-match', mode: 'unit' };
+        }
+
+        const totalValue = matchedPrice.unitPrice * quantity;
+
+        return createProductionValues({
+            workLog,
+            staffIds,
+            totalValue,
+            unitPriceUsed: matchedPrice.unitPrice,
+            priceSource: matchedPrice.priceSource,
+            calculationMode: 'unit',
+            project,
+            contract,
+        }, { tx });
     }
 
     // ═══════════════════════════════════════════════════

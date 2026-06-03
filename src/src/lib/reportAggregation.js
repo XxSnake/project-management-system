@@ -1,4 +1,5 @@
 import prisma from '@/lib/prisma';
+import { buildProjectDisplayName, buildWorkLogProjectDisplayName } from '@/lib/projectDisplayName';
 import { normalizeAllocationShare, normalizePricingMode, sumProductionValues } from '@/lib/worklogBilling';
 
 function getMonthRange(month) {
@@ -75,6 +76,14 @@ function getLogMeta(log) {
     };
 }
 
+function getProjectDisplayName(project) {
+    return buildProjectDisplayName(project) || '未绑定项目';
+}
+
+function getWorklogDisplayName(log) {
+    return buildWorkLogProjectDisplayName(log) || '未绑定项目';
+}
+
 export function aggregateReports(logs, groupBy = 'staff') {
     if (groupBy === 'project') {
         const map = new Map();
@@ -82,7 +91,7 @@ export function aggregateReports(logs, groupBy = 'staff') {
         logs.forEach((log) => {
             const meta = getLogMeta(log);
             const projectId = log.project?.id || 0;
-            const projectName = log.project?.name || '未绑定项目';
+            const projectName = getProjectDisplayName(log.project);
 
             if (!map.has(projectId)) {
                 map.set(projectId, {
@@ -220,7 +229,7 @@ export function aggregateReportsWithType(logs, testReports, groupBy = 'staff') {
 
         logs.forEach((log) => {
             const meta = getLogMeta(log);
-            const entry = ensureProject(log.project?.id || 0, log.project?.name || '未绑定项目');
+            const entry = ensureProject(log.project?.id || 0, getProjectDisplayName(log.project));
             entry.testingTotal += meta.totalValue;
             entry.total += meta.totalValue;
             entry.count += meta.totalValue > 0 ? 1 : 0;
@@ -233,7 +242,7 @@ export function aggregateReportsWithType(logs, testReports, groupBy = 'staff') {
 
         testReports.forEach((report) => {
             const reportValue = sumProductionValues(report);
-            const entry = ensureProject(report.project?.id || 0, report.project?.name || '未绑定项目');
+            const entry = ensureProject(report.project?.id || 0, getProjectDisplayName(report.project));
             entry.reportTotal += reportValue;
             entry.total += reportValue;
             entry.reportCount += 1;
@@ -338,7 +347,7 @@ export function buildReportDetailRows(testReports) {
                 类型: '出具报告',
                 日期: report.reportDate ? report.reportDate.toISOString().split('T')[0] : '',
                 报告编号: report.reportNo || '',
-                项目: report.project?.name || '未绑定项目',
+                项目: getProjectDisplayName(report.project),
                 检测内容: report.testContent,
                 数量: quantity,
                 单位: report.unit || '',
@@ -371,7 +380,7 @@ export function buildWorklogDetailRows(logs) {
 
             rows.push({
                 日期: log.workDate.toISOString().split('T')[0],
-                项目: log.project?.name || '未绑定项目',
+                项目: getWorklogDisplayName(log),
                 检测内容: log.testContent,
                 数量: meta.quantity,
                 单位: log.unit || '',

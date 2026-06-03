@@ -219,6 +219,12 @@ function sumContractGroupWorkLogs(projects = []) {
     return projects.reduce((sum, item) => sum + (item?._count?.workLogs || item?.workLogs?.length || 0), 0);
 }
 
+function dispatchInboxUpdated() {
+    if (typeof window !== 'undefined') {
+        window.dispatchEvent(new Event('inbox-updated'));
+    }
+}
+
 export default function ProjectDetailPage() {
     const router = useRouter();
     const params = useParams();
@@ -231,9 +237,15 @@ export default function ProjectDetailPage() {
     const [newRecord, setNewRecord] = useState({});
     const [viewingContract, setViewingContract] = useState(null);
     const [groupParentName, setGroupParentName] = useState('');
-    const [groupPhases, setGroupPhases] = useState([]);
+    const [groupDecisions, setGroupDecisions] = useState([]);
     const [groupSaving, setGroupSaving] = useState(false);
     const [groupMessage, setGroupMessage] = useState({ type: '', text: '' });
+    const [repairNoticeDismissed, setRepairNoticeDismissed] = useState(false);
+    const [repairingInspections, setRepairingInspections] = useState(false);
+    const [repairMessage, setRepairMessage] = useState({ type: '', text: '' });
+    const [noContractExpected, setNoContractExpected] = useState(false);
+    const [savingNoContractExpected, setSavingNoContractExpected] = useState(false);
+    const [contractExpectationMessage, setContractExpectationMessage] = useState({ type: '', text: '' });
 
     const load = useCallback(async () => {
         setLoading(true);
@@ -256,20 +268,37 @@ export default function ProjectDetailPage() {
 
     useEffect(() => {
         setGroupMessage({ type: '', text: '' });
+        setRepairNoticeDismissed(false);
+        setRepairMessage({ type: '', text: '' });
+        setContractExpectationMessage({ type: '', text: '' });
     }, [projectId]);
+
+    useEffect(() => {
+        setNoContractExpected(Boolean(project?.noContractExpected));
+    }, [project?.noContractExpected]);
+
+    useEffect(() => {
+        if (!project?.repairNeeded) {
+            setRepairNoticeDismissed(false);
+        }
+    }, [project?.repairNeeded]);
 
     useEffect(() => {
         const siblingProjects = project?.siblingProjects || [];
         if (siblingProjects.length === 0) {
             setGroupParentName('');
-            setGroupPhases([]);
+            setGroupDecisions([]);
             return;
         }
 
         setGroupParentName(getSuggestedParentName(siblingProjects) || normalizeText(project?.name));
-        setGroupPhases(siblingProjects.map((item) => ({
+        setGroupDecisions(siblingProjects.map((item) => ({
             id: item.id,
-            phase: normalizeText(item.phase),
+            role: 'subproject',
+            phase: normalizeText(item.phase) || '',
+            mergeTargetId: '',
+            buildingParentId: '',
+            buildingName: '',
         })));
     }, [project]);
 
@@ -318,11 +347,98 @@ export default function ProjectDetailPage() {
         await load();
     };
 
-    const handleGroupPhaseChange = (targetId, value) => {
-        setGroupPhases((current) => current.map((item) => (
-            item.id === targetId ? { ...item, phase: value } : item
-        )));
+    const handleRepairInspections = async () => {
+        try {
+            setRepairingInspections(true);
+            setRepairMessage({ type: '', text: '' });
+
+            const res = await fetch(`/api/projects/${projectId}/repair-inspections`, {
+                method: 'POST',
+            });
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+                throw new Error(data.error || '修复失败');
+            }
+
+            await load();
+
+            if (data.repairedCount > 0) {
+                const skippedText = data.skippedCount > 0
+                    ? `，另外跳过了 ${data.skippedCount} 条已经完整的记录`
+                    : '';
+                setRepairMessage({
+                    type: 'success',
+                    text: `已补齐 ${data.repairedCount} 条工作记录的检测明细${skippedText}。`,
+                });
+                return;
+            }
+
+            if (data.skippedCount > 0) {
+                setRepairMessage({
+                    type: 'success',
+                    text: `没有需要补齐的记录，${data.skippedCount} 条工作记录原本已经完整。`,
+                });
+                return;
+            }
+
+            setRepairMessage({
+                type: 'success',
+                text: '没有找到需要补齐的记录。',
+            });
+        } catch (e) {
+            setRepairMessage({
+                type: 'danger',
+                text: e.message || '修复失败',
+            });
+        } finally {
+            setRepairingInspections(false);
+        }
+    };
+
+    const handleGroupDecisionChange = (targetId, key, value) => {
+        setGroupDecisions((current) => current.map((item) => {
+            if (item.id === targetId) {
+                const next = { ...item, [key]: value };
+                return next;
+            }
+            return item;
+        }));
         setGroupMessage({ type: '', text: '' });
+    };
+
+    const handleSaveNoContractExpected = async () => {
+        try {
+            setSavingNoContractExpected(true);
+            setContractExpectationMessage({ type: '', text: '' });
+
+            const response = await fetch(`/api/projects/${projectId}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    noContractExpected,
+                }),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                throw new Error(data.error || '保存失败');
+            }
+
+            dispatchInboxUpdated();
+            await load();
+            setContractExpectationMessage({
+                type: 'success',
+                text: noContractExpected
+                    ? '已标记为“无需合同”，这个项目下的无合同工作记录不会再进入异常处理。'
+                    : '已取消“无需合同”，这个项目下的无合同工作记录会重新进入异常处理。',
+            });
+        } catch (e) {
+            setContractExpectationMessage({
+                type: 'danger',
+                text: e.message || '保存失败',
+            });
+        } finally {
+            setSavingNoContractExpected(false);
+        }
     };
 
     const handleApplyParentName = () => {
@@ -349,20 +465,39 @@ export default function ProjectDetailPage() {
             return;
         }
 
-        const payloadProjects = siblingProjects.map((item) => {
-            const draftPhase = groupPhases.find((draft) => draft.id === item.id)?.phase ?? '';
-            return {
+        const payloadProjects = groupDecisions.map((item) => {
+            const payload = {
                 id: item.id,
-                phase: normalizeText(draftPhase) || null,
+                role: item.role,
             };
+            if (item.role === 'subproject' || item.role === 'building-mode-self') {
+                payload.phase = normalizeText(item.phase) || null;
+            } else if (item.role === 'merge-into') {
+                payload.mergeTargetId = item.mergeTargetId || null;
+            } else if (item.role === 'building-under') {
+                payload.buildingParentId = item.buildingParentId || null;
+                payload.buildingName = normalizeText(item.buildingName) || null;
+            }
+            return payload;
         });
 
-        if (payloadProjects.filter((item) => !item.phase).length > 1) {
-            alert('当前有多个项目的子项仍为空。统一大项目名称后会出现重名，请先补齐子项。');
+        if (payloadProjects.filter((item) => (item.role === 'subproject') && !item.phase).length > 1) {
+            alert('当前有多个保留独立子项的项目，其子项名称仍为空。统一大项目名称后会出现重名，请先补齐子项。');
             return;
         }
 
-        if (!confirm(`确认保存合同项目组的整理结果吗？这次会同时更新 ${payloadProjects.length} 个项目。`)) {
+        const retainedCount = payloadProjects.filter((p) => p.role === 'subproject' || p.role === 'building-mode-self').length;
+        const mergedCount = payloadProjects.filter((p) => p.role === 'merge-into').length;
+        const buildingsCount = payloadProjects.filter((p) => p.role === 'building-under').length;
+
+        const confirmMessage = `本次操作将：
+- 统一大项目名为“${parentName}”
+- 保留 ${retainedCount} 个独立项目
+- 合并并删除 ${mergedCount} 个项目
+- 新增 ${buildingsCount} 个单体
+确认执行？`;
+
+        if (!confirm(confirmMessage)) {
             return;
         }
 
@@ -425,6 +560,7 @@ export default function ProjectDetailPage() {
                     <h2 style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
                         {project.name}
                         {project.buildingMode ? <span className="badge badge-info">单体建筑模式</span> : null}
+                        {!contract && project.noContractExpected ? <span className="badge badge-info">无需合同</span> : null}
                         {contract ? (
                             <button
                                 type="button"
@@ -461,6 +597,100 @@ export default function ProjectDetailPage() {
             </div>
 
             <div className="page-body">
+                {repairMessage.text ? (
+                    <div
+                        className={`alert ${repairMessage.type === 'danger' ? 'alert-danger' : 'alert-success'}`}
+                        style={{ marginBottom: 16 }}
+                    >
+                        {repairMessage.text}
+                    </div>
+                ) : null}
+
+                {project.repairNeeded && !repairNoticeDismissed ? (
+                    <div className="alert alert-warning" style={{ marginBottom: 16 }}>
+                        <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                            <div style={{ flex: '1 1 320px', lineHeight: 1.6 }}>
+                                有 {project.missingDetectionRecordCount} 条工作记录的检测明细还没有补齐。
+                                现在打开项目详情页只会读取数据，不会再自动修改；如果要补齐，请手动点“点击修复”。
+                            </div>
+                            <div className="page-actions" style={{ marginLeft: 'auto' }}>
+                                <button
+                                    type="button"
+                                    className="btn btn-primary"
+                                    disabled={repairingInspections}
+                                    onClick={() => void handleRepairInspections()}
+                                >
+                                    {repairingInspections ? '修复中...' : '点击修复'}
+                                </button>
+                                <button
+                                    type="button"
+                                    className="btn btn-secondary"
+                                    disabled={repairingInspections}
+                                    onClick={() => setRepairNoticeDismissed(true)}
+                                >
+                                    先关闭
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                ) : null}
+
+                <section className="card stack" style={{ marginBottom: 16 }}>
+                    <div className="card-header">
+                        <div className="card-copy">
+                            <div className="panel-eyebrow">Contract Expectation</div>
+                            <div className="panel-title">合同要求</div>
+                            <div className="panel-note">
+                                用来标记这个项目是不是本来就不需要合同。勾上以后，无合同工作记录不会再进“项目未绑合同”异常。
+                            </div>
+                        </div>
+                    </div>
+
+                    {contractExpectationMessage.text ? (
+                        <div className={`alert ${contractExpectationMessage.type === 'danger' ? 'alert-danger' : 'alert-success'}`} style={{ marginBottom: 0 }}>
+                            {contractExpectationMessage.text}
+                        </div>
+                    ) : null}
+
+                    {contract ? (
+                        <div className="alert alert-warning" style={{ marginBottom: 0 }}>
+                            这个项目已经关联合同，不能再标记为“无需合同”。
+                        </div>
+                    ) : (
+                        <div style={{ display: 'grid', gap: 12 }}>
+                            <label style={{ display: 'flex', alignItems: 'flex-start', gap: 12, cursor: 'pointer' }}>
+                                <input
+                                    type="checkbox"
+                                    checked={noContractExpected}
+                                    onChange={(event) => setNoContractExpected(event.target.checked)}
+                                    disabled={savingNoContractExpected}
+                                    style={{ marginTop: 4 }}
+                                />
+                                <div>
+                                    <div style={{ fontWeight: 600, marginBottom: 4 }}>此项目无需合同</div>
+                                    <div className="panel-note">
+                                        适用于内部项目、试点项目、公益项目等本来就不会上传合同的情况。
+                                    </div>
+                                </div>
+                            </label>
+
+                            <div className="page-actions">
+                                <span className={noContractExpected ? 'badge badge-info' : 'badge badge-warning'}>
+                                    {noContractExpected ? '已标记为无需合同' : '仍按待关联合同处理'}
+                                </span>
+                                <button
+                                    type="button"
+                                    className="btn btn-primary"
+                                    disabled={savingNoContractExpected || noContractExpected === Boolean(project.noContractExpected)}
+                                    onClick={() => void handleSaveNoContractExpected()}
+                                >
+                                    {savingNoContractExpected ? '保存中...' : '保存设置'}
+                                </button>
+                            </div>
+                        </div>
+                    )}
+                </section>
+
                 {project.buildingMode && (
                     <section className="table-shell" style={{ marginBottom: 16 }}>
                         <div className="card-header">
@@ -549,40 +779,117 @@ export default function ProjectDetailPage() {
                             ) : null}
 
                             <div className="project-group-list">
-                                {siblingProjects.map((item) => {
-                                    const phaseDraft = groupPhases.find((draft) => draft.id === item.id)?.phase ?? '';
-                                    const phasePlaceholder = extractPhasePlaceholder(item.name, normalizedGroupParentName) || CONTRACT_GROUP_PHASE_PLACEHOLDER;
-                                    const currentDisplayName = buildProjectDisplayName(item);
-                                    const nextDisplayName = buildProjectDisplayName(normalizedGroupParentName || item.name, normalizeText(phaseDraft) || null)
-                                        || normalizedGroupParentName
-                                        || item.name;
+                                {(() => {
+                                    const getIncomingMergesCount = (id) => groupDecisions.filter(d => d.role === 'merge-into' && Number(d.mergeTargetId) === id).length;
+                                    const getIncomingBuildingsCount = (id) => groupDecisions.filter(d => d.role === 'building-under' && Number(d.buildingParentId) === id).length;
 
-                                    return (
-                                        <div
-                                            key={item.id}
-                                            className={`project-group-row${item.id === numericProjectId ? ' project-group-row--current' : ''}`}
-                                        >
-                                            <div className="project-group-row-meta">
-                                                <div className="project-group-row-head">
-                                                    <span className="badge badge-info">#{item.id}</span>
-                                                    {item.id === numericProjectId ? <span className="badge badge-warning">当前项目</span> : null}
-                                                    <span className="badge badge-success">{item._count?.workLogs || item.workLogs?.length || 0} 条工作记录</span>
+                                    return siblingProjects.map((item) => {
+                                        const decision = groupDecisions.find((draft) => draft.id === item.id) || {};
+                                        const role = decision.role || 'subproject';
+                                        const phasePlaceholder = extractPhasePlaceholder(item.name, normalizedGroupParentName) || CONTRACT_GROUP_PHASE_PLACEHOLDER;
+                                        const currentDisplayName = buildProjectDisplayName(item);
+
+                                        let nextDisplayName = '';
+                                        if (role === 'subproject' || role === 'building-mode-self') {
+                                            nextDisplayName = buildProjectDisplayName(normalizedGroupParentName || item.name, normalizeText(decision.phase) || null) || normalizedGroupParentName || item.name;
+                                        } else if (role === 'merge-into') {
+                                            const targetProject = siblingProjects.find(p => p.id === Number(decision.mergeTargetId));
+                                            nextDisplayName = `将并入 → #${decision.mergeTargetId || '?'} ${targetProject ? buildProjectDisplayName(targetProject) : ''}`;
+                                        } else if (role === 'building-under') {
+                                            const parentProject = siblingProjects.find(p => p.id === Number(decision.buildingParentId));
+                                            nextDisplayName = `将成为 ${parentProject ? buildProjectDisplayName(parentProject) : `#${decision.buildingParentId || '?'}`} 的单体 "${decision.buildingName || ''}"`;
+                                        }
+
+                                        const incomingMerges = getIncomingMergesCount(item.id);
+                                        const incomingBuildings = getIncomingBuildingsCount(item.id);
+                                        const isLockedToParent = incomingMerges > 0 || incomingBuildings > 0;
+
+                                        const targetCandidates = siblingProjects.filter(p => {
+                                            if (p.id === item.id) return false;
+                                            const pDecision = groupDecisions.find(draft => draft.id === p.id) || {};
+                                            return pDecision.role === 'subproject' || pDecision.role === 'building-mode-self';
+                                        });
+
+                                        return (
+                                            <div key={item.id} className={`project-group-row${item.id === numericProjectId ? ' project-group-row--current' : ''}`}>
+                                                <div className="project-group-row-meta">
+                                                    <div className="project-group-row-head">
+                                                        <span className="badge badge-info">#{item.id}</span>
+                                                        {item.id === numericProjectId ? <span className="badge badge-warning">当前项目</span> : null}
+                                                        <span className="badge badge-success">{item._count?.workLogs || item.workLogs?.length || 0} 条工作记录</span>
+                                                    </div>
+                                                    <div className="project-group-row-name">{currentDisplayName || '未命名项目'}</div>
+                                                    <div className="project-group-row-note">保存后：{nextDisplayName}</div>
+                                                    {incomingMerges > 0 && <div className="badge badge-warning" style={{marginTop:4, display:'inline-flex', alignSelf:'flex-start'}}>← {incomingMerges} 个项目将合并到这里</div>}
+                                                    {incomingBuildings > 0 && <div className="badge badge-info" style={{marginTop:4, display:'inline-flex', alignSelf:'flex-start'}}>← {incomingBuildings} 个单体挂在这里</div>}
                                                 </div>
-                                                <div className="project-group-row-name">{currentDisplayName || '未命名项目'}</div>
-                                                <div className="project-group-row-note">保存后：{nextDisplayName}</div>
+
+                                                <div className="form-group" style={{gap: 12}}>
+                                                    <div className="form-group">
+                                                        <label>角色</label>
+                                                        <select
+                                                            className="form-select"
+                                                            value={role === 'building-mode-self' ? 'subproject' : role}
+                                                            onChange={(e) => handleGroupDecisionChange(item.id, 'role', e.target.value)}
+                                                            disabled={isLockedToParent}
+                                                        >
+                                                            <option value="subproject">保持独立（子项）</option>
+                                                            <option value="merge-into">合并到同组其他项目</option>
+                                                            <option value="building-under">作为其他项目的单体</option>
+                                                        </select>
+                                                    </div>
+
+                                                    {(role === 'subproject' || role === 'building-mode-self') ? (
+                                                        <div className="form-group" style={{paddingTop: 8, borderTop: '1px dashed rgba(95,119,165,0.2)'}}>
+                                                            <label>子项 / 阶段</label>
+                                                            <input
+                                                                className="form-input"
+                                                                value={decision.phase || ''}
+                                                                placeholder={phasePlaceholder}
+                                                                onChange={(e) => handleGroupDecisionChange(item.id, 'phase', e.target.value)}
+                                                            />
+                                                        </div>
+                                                    ) : role === 'merge-into' ? (
+                                                        <div className="form-group" style={{paddingTop: 8, borderTop: '1px dashed rgba(95,119,165,0.2)'}}>
+                                                            <label>目标项目</label>
+                                                            <select
+                                                                className="form-select"
+                                                                value={decision.mergeTargetId || ''}
+                                                                onChange={(e) => handleGroupDecisionChange(item.id, 'mergeTargetId', e.target.value)}
+                                                            >
+                                                                <option value="">请选择合并目标...</option>
+                                                                {targetCandidates.map(p => <option key={p.id} value={p.id}>#{p.id} - {buildProjectDisplayName(p)}</option>)}
+                                                            </select>
+                                                        </div>
+                                                    ) : role === 'building-under' ? (
+                                                        <div style={{display: 'flex', flexDirection: 'column', gap: 12, paddingTop: 8, borderTop: '1px dashed rgba(95,119,165,0.2)'}}>
+                                                            <div className="form-group">
+                                                                <label>单体所属父项目</label>
+                                                                <select
+                                                                    className="form-select"
+                                                                    value={decision.buildingParentId || ''}
+                                                                    onChange={(e) => handleGroupDecisionChange(item.id, 'buildingParentId', e.target.value)}
+                                                                >
+                                                                    <option value="">请选择父项目...</option>
+                                                                    {targetCandidates.map(p => <option key={p.id} value={p.id}>#{p.id} - {buildProjectDisplayName(p)}</option>)}
+                                                                </select>
+                                                            </div>
+                                                            <div className="form-group">
+                                                                <label>单体名称</label>
+                                                                <input
+                                                                    className="form-input"
+                                                                    value={decision.buildingName || ''}
+                                                                    placeholder="例如：1#宿舍楼"
+                                                                    onChange={(e) => handleGroupDecisionChange(item.id, 'buildingName', e.target.value)}
+                                                                />
+                                                            </div>
+                                                        </div>
+                                                    ) : null}
+                                                </div>
                                             </div>
-                                            <div className="form-group">
-                                                <label>子项 / 阶段</label>
-                                                <input
-                                                    className="form-input"
-                                                    value={phaseDraft}
-                                                    placeholder={phasePlaceholder}
-                                                    onChange={(e) => handleGroupPhaseChange(item.id, e.target.value)}
-                                                />
-                                            </div>
-                                        </div>
-                                    );
-                                })}
+                                        );
+                                    });
+                                })()}
                             </div>
                         </div>
                     </section>

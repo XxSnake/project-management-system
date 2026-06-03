@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/navigation';
+import ContractDetailModal from '@/components/ContractDetailModal';
 import { buildProjectDisplayName } from '@/lib/projectDisplayName';
 
 const STATUS_OPTIONS = ['进行中', '已完成', '暂停'];
@@ -50,12 +51,20 @@ function getProjectOptionLabel(project) {
     return buildProjectDisplayName(project);
 }
 
+function dispatchInboxUpdated() {
+    if (typeof window !== 'undefined') {
+        window.dispatchEvent(new Event('inbox-updated'));
+    }
+}
+
 export default function ProjectsPage() {
     const router = useRouter();
     const [projects, setProjects] = useState([]);
     const [contracts, setContracts] = useState([]);
     const [showForm, setShowForm] = useState(false);
     const [form, setForm] = useState(EMPTY_FORM);
+    const [consumedEditId, setConsumedEditId] = useState(null);
+    const [requestedEditId, setRequestedEditId] = useState(null);
     const [selectedIds, setSelectedIds] = useState([]);
     const [deletingBatch, setDeletingBatch] = useState(false);
     const [linkingProjectId, setLinkingProjectId] = useState(null);
@@ -70,6 +79,8 @@ export default function ProjectsPage() {
     const [sameContractTargetId, setSameContractTargetId] = useState('');
     const [sameContractPhase, setSameContractPhase] = useState('');
     const [sameContractSubmitting, setSameContractSubmitting] = useState(false);
+    const [savingNoContractExpectedId, setSavingNoContractExpectedId] = useState(null);
+    const [batchNoContractExpectedSaving, setBatchNoContractExpectedSaving] = useState(false);
 
     const refreshData = async () => {
         const [projectResponse, contractResponse] = await Promise.all([
@@ -157,6 +168,38 @@ export default function ProjectsPage() {
         });
         setShowForm(true);
     };
+
+    useEffect(() => {
+        if (typeof window === 'undefined') {
+            return;
+        }
+
+        const params = new URLSearchParams(window.location.search);
+        const nextEditId = Number.parseInt(params.get('editId') || '', 10);
+        setRequestedEditId(Number.isInteger(nextEditId) ? nextEditId : null);
+    }, []);
+
+    useEffect(() => {
+        if (!Number.isInteger(requestedEditId) || consumedEditId === requestedEditId) {
+            return;
+        }
+
+        const project = projects.find((item) => item.id === requestedEditId);
+        if (!project) {
+            return;
+        }
+
+        setForm({
+            id: String(project.id),
+            name: project.name || '',
+            status: normalizeStatus(project.status),
+            phase: project.phase || '',
+            contractId: project.contractId ? String(project.contractId) : '',
+            buildingMode: Boolean(project.buildingMode),
+        });
+        setShowForm(true);
+        setConsumedEditId(requestedEditId);
+    }, [consumedEditId, projects, requestedEditId]);
 
     const handleDelete = async (id) => {
         if (!confirm('确认删除这个项目吗？')) {
@@ -352,6 +395,109 @@ export default function ProjectsPage() {
 
         if (projectId === linkingProjectId) {
             setLinkingProjectId(null);
+        }
+    };
+
+    const updateNoContractExpected = async (project, nextValue) => {
+        if (!project?.id) {
+            return { ok: false, error: '项目不存在' };
+        }
+
+        setSavingNoContractExpectedId(project.id);
+        try {
+            const response = await fetch(`/api/projects/${project.id}`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    noContractExpected: nextValue,
+                }),
+            });
+            const data = await response.json().catch(() => ({}));
+            if (!response.ok) {
+                return {
+                    ok: false,
+                    error: data.error || '保存失败',
+                };
+            }
+
+            return {
+                ok: true,
+                data,
+            };
+        } finally {
+            setSavingNoContractExpectedId((current) => (current === project.id ? null : current));
+        }
+    };
+
+    const handleToggleNoContractExpected = async (project, nextValue) => {
+        if (!project) {
+            return;
+        }
+
+        const result = await updateNoContractExpected(project, nextValue);
+        if (!result.ok) {
+            alert(result.error || '保存失败');
+            return;
+        }
+
+        dispatchInboxUpdated();
+        await refreshData();
+    };
+
+    const handleBatchNoContractExpected = async (nextValue) => {
+        if (selectedIds.length === 0) {
+            return;
+        }
+
+        const selectedProjects = normalizedProjects.filter((project) => selectedIds.includes(project.id));
+        const eligibleProjects = selectedProjects.filter((project) => {
+            if (nextValue && project.contractId) {
+                return false;
+            }
+
+            return Boolean(project.noContractExpected) !== nextValue;
+        });
+        const skippedLinkedProjects = nextValue
+            ? selectedProjects.filter((project) => project.contractId)
+            : [];
+
+        if (eligibleProjects.length === 0) {
+            alert(nextValue
+                ? '选中的项目里没有可标记为“无需合同”的无合同项目。'
+                : '选中的项目里没有已标记“无需合同”的项目。');
+            return;
+        }
+
+        const actionLabel = nextValue ? '标记为无需合同' : '取消无需合同标记';
+        if (!confirm(`确认${actionLabel} ${eligibleProjects.length} 个项目吗？`)) {
+            return;
+        }
+
+        setBatchNoContractExpectedSaving(true);
+        try {
+            let successCount = 0;
+            let failedCount = 0;
+
+            for (const project of eligibleProjects) {
+                const result = await updateNoContractExpected(project, nextValue);
+                if (result.ok) {
+                    successCount += 1;
+                } else {
+                    failedCount += 1;
+                }
+            }
+
+            dispatchInboxUpdated();
+            await refreshData();
+
+            const summary = [
+                `已处理 ${successCount} 个项目`,
+                skippedLinkedProjects.length > 0 ? `跳过 ${skippedLinkedProjects.length} 个已关联合同项目` : '',
+                failedCount > 0 ? `失败 ${failedCount} 个项目` : '',
+            ].filter(Boolean).join('，');
+            alert(summary);
+        } finally {
+            setBatchNoContractExpectedSaving(false);
         }
     };
 
@@ -567,6 +713,7 @@ export default function ProjectsPage() {
     const activeCount = normalizedProjects.filter((item) => item.normalizedStatus === '进行中').length;
     const completedCount = normalizedProjects.filter((item) => item.normalizedStatus === '已完成').length;
     const linkedCount = normalizedProjects.filter((item) => item.contract).length;
+    const noContractExpectedCount = normalizedProjects.filter((item) => item.noContractExpected).length;
     const allSelected = normalizedProjects.length > 0 && selectedIds.length === normalizedProjects.length;
 
     return (
@@ -584,6 +731,22 @@ export default function ProjectsPage() {
                     </button>
                     <button type="button" className="btn btn-danger" onClick={() => void handleBatchDelete()} disabled={!selectedIds.length || deletingBatch}>
                         {deletingBatch ? '批量删除中' : `批量删除 (${selectedIds.length})`}
+                    </button>
+                    <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={() => void handleBatchNoContractExpected(true)}
+                        disabled={!selectedIds.length || batchNoContractExpectedSaving}
+                    >
+                        {batchNoContractExpectedSaving ? '处理中...' : `批量标为无需合同 (${selectedIds.length})`}
+                    </button>
+                    <button
+                        type="button"
+                        className="btn btn-secondary"
+                        onClick={() => void handleBatchNoContractExpected(false)}
+                        disabled={!selectedIds.length || batchNoContractExpectedSaving}
+                    >
+                        取消无需合同标记
                     </button>
                     <button
                         type="button"
@@ -641,6 +804,7 @@ export default function ProjectsPage() {
                     <div className="metric-card"><div className="metric-label">进行中</div><div className="metric-value success">{activeCount}</div><div className="metric-meta">仍在持续推进的项目</div></div>
                     <div className="metric-card"><div className="metric-label">已完成</div><div className="metric-value">{completedCount}</div><div className="metric-meta">已完成或已归档的项目</div></div>
                     <div className="metric-card"><div className="metric-label">已关联合同</div><div className="metric-value magenta">{linkedCount}</div><div className="metric-meta">已建立合同映射，便于产值计算</div></div>
+                    <div className="metric-card"><div className="metric-label">无需合同</div><div className="metric-value">{noContractExpectedCount}</div><div className="metric-meta">已确认这类项目本来就不需要上传合同</div></div>
                 </div>
 
                 {showForm ? (
@@ -717,12 +881,13 @@ export default function ProjectsPage() {
                         <div className="card-copy">
                             <div className="panel-eyebrow">Project Ledger</div>
                             <div className="panel-title">项目列表</div>
-                            <div className="panel-note">勾选后可直接批量删除；单项仍可继续编辑状态和合同关联。</div>
+                            <div className="panel-note">勾选后可直接批量删除，也可以批量标记“无需合同”；无合同项目会额外显示当前合同策略。</div>
                         </div>
                         <div className="table-toolbar-meta">
                             <span>总数：{normalizedProjects.length}</span>
                             <span>已选：{selectedIds.length}</span>
                             <span>已关联合同：{linkedCount}</span>
+                            <span>无需合同：{noContractExpectedCount}</span>
                         </div>
                     </div>
 
@@ -751,6 +916,7 @@ export default function ProjectsPage() {
                                         <th>状态</th>
                                         <th>阶段 / 子项</th>
                                         <th>关联合同</th>
+                                        <th>合同策略</th>
                                         <th>操作</th>
                                     </tr>
                                 </thead>
@@ -758,6 +924,7 @@ export default function ProjectsPage() {
                                     {normalizedProjects.map((project) => {
                                         const isSelected = selectedIds.includes(project.id);
                                         const isLinking = linkingProjectId === project.id;
+                                        const isSavingNoContractExpected = savingNoContractExpectedId === project.id;
 
                                         return (
                                             <tr key={project.id} className={isSelected ? 'row-selected' : ''}>
@@ -848,6 +1015,28 @@ export default function ProjectsPage() {
                                                     )}
                                                 </td>
                                                 <td>
+                                                    {project.contract ? (
+                                                        <span className="badge badge-success">按合同处理</span>
+                                                    ) : (
+                                                        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+                                                            <span className={project.noContractExpected ? 'badge badge-info' : 'badge badge-warning'}>
+                                                                {project.noContractExpected ? '无需合同' : '待关联合同'}
+                                                            </span>
+                                                            <button
+                                                                type="button"
+                                                                className="btn btn-secondary"
+                                                                style={{ minHeight: '28px', padding: '0 10px', fontSize: '0.7rem' }}
+                                                                disabled={isSavingNoContractExpected || batchNoContractExpectedSaving}
+                                                                onClick={() => void handleToggleNoContractExpected(project, !project.noContractExpected)}
+                                                            >
+                                                                {isSavingNoContractExpected
+                                                                    ? '保存中...'
+                                                                    : (project.noContractExpected ? '改回待绑定' : '标为无需合同')}
+                                                            </button>
+                                                        </div>
+                                                    )}
+                                                </td>
+                                                <td>
                                                     <div className="page-actions">
                                                         <button type="button" className="btn btn-secondary" style={{ minHeight: '32px', padding: '0 12px', fontSize: '0.72rem' }} onClick={() => router.push(`/master/projects/${project.id}`)}>详情</button>
                                                         <button type="button" className="btn btn-primary" style={{ minHeight: '32px', padding: '0 12px', fontSize: '0.72rem' }} onClick={() => handleOpenContractUpload(project)}>上传合同</button>
@@ -865,61 +1054,12 @@ export default function ProjectsPage() {
                 </section>
             </div>
 
-            {/* Contract Detail Dialog */}
-            {viewingContract && (
-                <div style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.5)', backdropFilter: 'blur(4px)' }} onClick={() => setViewingContract(null)}>
-                    <div className="card stack" style={{ width: '90%', maxWidth: 700, padding: 24, maxHeight: '80vh', overflow: 'auto' }} onClick={(e) => e.stopPropagation()}>
-                        <div className="panel-eyebrow">Contract Detail</div>
-                        <div className="panel-title" style={{ marginBottom: 4 }}>
-                            {viewingContract.contractNo || `合同 #${viewingContract.id}`}
-                        </div>
-                        <div className="panel-note" style={{ marginBottom: 16 }}>
-                            {[viewingContract.clientName && `委托方：${viewingContract.clientName}`, viewingContract.partyB && `受托方：${viewingContract.partyB}`, viewingContract.signedDate && `签订日期：${new Date(viewingContract.signedDate).toLocaleDateString('zh-CN')}`, ({ area: `按面积计价 · 总价 ¥${Number(viewingContract.areaPricingAmount || 0).toLocaleString()} · 面积 ${viewingContract.areaPricingArea || '-'}`, mixed: `混合计费 · 面积部分 ¥${Number(viewingContract.areaPricingAmount || 0).toLocaleString()} · 面积 ${viewingContract.areaPricingArea || '-'}`, lumpsum: `包干价 · 总价 ¥${Number(viewingContract.lumpSumAmount || 0).toLocaleString()}` }[viewingContract.pricingMode] || '按单价计价')].filter(Boolean).join(' · ')}
-                        </div>
-
-                        {(viewingContract.priceItems || []).length > 0 ? (
-                            <div className="data-table-shell">
-                                <table className="data-table">
-                                    <thead>
-                                        <tr>
-                                            <th style={{ width: 50 }}>序号</th>
-                                            <th>检测项目</th>
-                                            <th style={{ width: 120 }}>数量</th>
-                                            <th style={{ width: 100 }}>单位</th>
-                                            <th style={{ width: 130 }}>单价</th>
-                                            <th style={{ width: 140 }}>小计</th>
-                                        </tr>
-                                    </thead>
-                                    <tbody>
-                                        {viewingContract.priceItems.map((item, idx) => (
-                                            <tr key={item.id || idx}>
-                                                <td style={{ textAlign: 'center', color: 'var(--color-muted)' }}>{idx + 1}</td>
-                                                <td>{item.testItemName}</td>
-                                                <td>{item.quantity ?? '-'}</td>
-                                                <td>{item.unit || '-'}</td>
-                                                <td>¥{Number(item.unitPrice || 0).toFixed(2)}</td>
-                                                <td>¥{((Number(item.quantity) || 0) * (Number(item.unitPrice) || 0)).toFixed(2)}</td>
-                                            </tr>
-                                        ))}
-                                    </tbody>
-                                    <tfoot>
-                                        <tr>
-                                            <td colSpan={5} style={{ textAlign: 'right', fontWeight: 600 }}>合计</td>
-                                            <td style={{ fontWeight: 600 }}>¥{viewingContract.priceItems.reduce((sum, item) => sum + (Number(item.quantity) || 0) * (Number(item.unitPrice) || 0), 0).toLocaleString()}</td>
-                                        </tr>
-                                    </tfoot>
-                                </table>
-                            </div>
-                        ) : (
-                            <div style={{ textAlign: 'center', color: 'var(--color-muted)', padding: '24px 0' }}>该合同暂无检测项目清单</div>
-                        )}
-
-                        <div className="page-actions" style={{ marginTop: 16 }}>
-                            <button type="button" className="btn btn-secondary" onClick={() => setViewingContract(null)}>关闭</button>
-                        </div>
-                    </div>
-                </div>
-            )}
+            {viewingContract ? (
+                <ContractDetailModal
+                    contract={viewingContract}
+                    onClose={() => setViewingContract(null)}
+                />
+            ) : null}
 
             {sameContractDecision && (
                 <div

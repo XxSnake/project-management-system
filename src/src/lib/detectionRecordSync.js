@@ -19,10 +19,12 @@ function formatQuantity(quantity, unit) {
  * - 首次：根据 worklog 初始化 override 和 src 快照
  * - 已存在：仅刷新 src 快照（保留用户的覆盖层编辑）
  */
-export async function syncDetectionRecordFromWorkLog(workLogId) {
+export async function syncDetectionRecordFromWorkLog(workLogId, options = {}) {
+    const { tx = prisma } = options;
+
     if (!workLogId) return null;
 
-    const log = await prisma.workLog.findUnique({
+    const log = await tx.workLog.findUnique({
         where: { id: workLogId },
         include: {
             project: true,
@@ -37,13 +39,13 @@ export async function syncDetectionRecordFromWorkLog(workLogId) {
     const srcDetectDate = log.workDate || null;
     const srcMainTester = formatTesters(log.staffMembers);
 
-    const existing = await prisma.projectDetectionRecord.findUnique({
+    const existing = await tx.projectDetectionRecord.findUnique({
         where: { workLogId },
     });
 
     if (existing) {
         // 只更新 src 快照 + 项目归属；overrides 由用户管理
-        return prisma.projectDetectionRecord.update({
+        return tx.projectDetectionRecord.update({
             where: { id: existing.id },
             data: {
                 projectId: log.projectId,
@@ -55,11 +57,11 @@ export async function syncDetectionRecordFromWorkLog(workLogId) {
         });
     }
 
-    const count = await prisma.projectDetectionRecord.count({
+    const count = await tx.projectDetectionRecord.count({
         where: { projectId: log.projectId },
     });
 
-    return prisma.projectDetectionRecord.create({
+    return tx.projectDetectionRecord.create({
         data: {
             projectId: log.projectId,
             workLogId,

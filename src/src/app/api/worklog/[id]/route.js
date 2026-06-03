@@ -1,52 +1,11 @@
 import prisma from '@/lib/prisma';
 import {
-    buildWorkLogProjectDisplayName,
-    findOrCreateProjectByDisplayName,
-} from '@/lib/projectResolver';
-import { calculateProductionValue } from '@/lib/productionCalculator';
-import { syncDetectionRecordFromWorkLog } from '@/lib/detectionRecordSync';
-import { normalizeAllocationShare } from '@/lib/worklogBilling';
+    buildPendingAllocationPayload,
+    WorkLogMutationError,
+    updateWorkLogAndRecalculate,
+} from '@/lib/workLogMutations';
 
 import { NextResponse } from 'next/server';
-
-function parseOptionalFloat(value) {
-    if (value === null || value === undefined || value === '') {
-        return null;
-    }
-
-    const numeric = Number.parseFloat(value);
-    return Number.isFinite(numeric) ? numeric : null;
-}
-
-async function resolveStaffIds(staffNames = []) {
-    const staffIds = [];
-
-    for (const name of staffNames) {
-        if (!name) {
-            continue;
-        }
-
-        let staff = await prisma.staff.findFirst({ where: { name } });
-        if (!staff) {
-            staff = await prisma.staff.create({ data: { name } });
-        }
-        staffIds.push(staff.id);
-    }
-
-    return staffIds;
-}
-
-function buildPendingAllocationPayload(log, calculation) {
-    if (!calculation?.pendingAllocation) {
-        return null;
-    }
-
-    return {
-        ...calculation.pendingAllocation,
-        projectName: buildWorkLogProjectDisplayName(log),
-        staffNames: (log.staffMembers || []).map((item) => item.staff?.name).filter(Boolean),
-    };
-}
 
 export async function PUT(request, { params }) {
     try {
@@ -56,103 +15,8 @@ export async function PUT(request, { params }) {
             return NextResponse.json({ error: '无效记录 ID' }, { status: 400 });
         }
 
-        const existingLog = await prisma.workLog.findUnique({
-            where: { id: worklogId },
-            include: {
-                project: true,
-                staffMembers: {
-                    include: {
-                        staff: true,
-                    },
-                },
-            },
-        });
-
-        if (!existingLog) {
-            return NextResponse.json({ error: '工作记录不存在' }, { status: 404 });
-        }
-
         const data = await request.json();
-        const nextProjectName = typeof data.projectName === 'string'
-            ? data.projectName
-            : buildWorkLogProjectDisplayName(existingLog);
-        const nextStaffNames = Array.isArray(data.staffNames)
-            ? data.staffNames
-            : existingLog.staffMembers.map((item) => item.staff?.name).filter(Boolean);
-
-        const resolvedProject = await findOrCreateProjectByDisplayName(nextProjectName, existingLog.projectId, prisma);
-        const project = resolvedProject.project;
-        const staffIds = await resolveStaffIds(nextStaffNames);
-        const allocationShare = Object.prototype.hasOwnProperty.call(data, 'allocationShare')
-            ? normalizeAllocationShare(data.allocationShare)
-            : existingLog.allocationShare;
-        const manualTotalValue = Object.prototype.hasOwnProperty.call(data, 'manualTotalValue')
-            ? parseOptionalFloat(data.manualTotalValue)
-            : existingLog.manualTotalValue;
-        const manualValueNote = Object.prototype.hasOwnProperty.call(data, 'manualValueNote')
-            ? (data.manualValueNote ? String(data.manualValueNote).trim() : null)
-            : existingLog.manualValueNote;
-
-        const updatedLog = await prisma.workLog.update({
-            where: { id: worklogId },
-            data: {
-                workDate: data.workDate ? new Date(data.workDate) : existingLog.workDate,
-                projectId: project?.id || null,
-                buildingName: resolvedProject.buildingName,
-                testContent: data.testContent ?? existingLog.testContent,
-                quantity: data.quantity !== undefined ? (Number.parseFloat(data.quantity) || 0) : existingLog.quantity,
-                unit: data.unit !== undefined ? (data.unit || null) : existingLog.unit,
-                remarks: data.remarks !== undefined ? (data.remarks || null) : existingLog.remarks,
-                allocationShare,
-                manualTotalValue,
-                manualValueNote,
-            },
-        });
-
-        await prisma.workLogStaff.deleteMany({
-            where: { workLogId: worklogId },
-        });
-
-        if (staffIds.length > 0) {
-            await prisma.workLogStaff.createMany({
-                data: staffIds.map((staffId) => ({
-                    staffId,
-                    workLogId: worklogId,
-                })),
-            });
-        }
-
-        await prisma.productionValue.deleteMany({
-            where: { workLogId: worklogId },
-        });
-
-        const calculation = await calculateProductionValue(
-            {
-                ...updatedLog,
-                buildingName: resolvedProject.buildingName,
-                project,
-            },
-            staffIds,
-        );
-
-        await syncDetectionRecordFromWorkLog(worklogId);
-
-        const refreshedLog = await prisma.workLog.findUnique({
-            where: { id: worklogId },
-            include: {
-                project: {
-                    include: {
-                        contract: true,
-                    },
-                },
-                staffMembers: {
-                    include: {
-                        staff: true,
-                    },
-                },
-                productionValues: true,
-            },
-        });
+        const { refreshedLog, calculation } = await updateWorkLogAndRecalculate(worklogId, data);
 
         return NextResponse.json({
             success: true,
@@ -162,7 +26,8 @@ export async function PUT(request, { params }) {
         });
     } catch (error) {
         console.error('Update worklog error:', error);
-        return NextResponse.json({ error: error.message }, { status: 500 });
+        const status = error instanceof WorkLogMutationError ? error.status : 500;
+        return NextResponse.json({ error: error.message }, { status });
     }
 }
 

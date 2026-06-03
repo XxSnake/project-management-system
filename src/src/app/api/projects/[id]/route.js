@@ -1,7 +1,6 @@
 import prisma from '@/lib/prisma';
 import {
     computeDetectionDrift,
-    syncDetectionRecordFromWorkLog,
 } from '@/lib/detectionRecordSync';
 import { normalizeProjectName } from '@/lib/projectDisplayName';
 import { NextResponse } from 'next/server';
@@ -30,6 +29,14 @@ function buildBuildingSummaries(workLogs = []) {
     }
 
     return Array.from(summaries.values()).sort((left, right) => left.buildingName.localeCompare(right.buildingName, 'zh-CN'));
+}
+
+function normalizeNoContractExpected(value, fallback = false) {
+    if (value === undefined) {
+        return fallback;
+    }
+
+    return value === true || value === 'true' || value === 1 || value === '1';
 }
 
 async function getSiblingProjects(contractId) {
@@ -79,29 +86,20 @@ async function getSiblingProjects(contractId) {
     });
 }
 
+async function getMissingDetectionRecordCount(projectId) {
+    return prisma.workLog.count({
+        where: {
+            projectId,
+            detectionRecord: null,
+        },
+    });
+}
+
 export async function GET(_request, { params }) {
     const { id } = await params;
     const projectId = Number.parseInt(id, 10);
     if (Number.isNaN(projectId)) {
         return NextResponse.json({ error: '无效项目 ID' }, { status: 400 });
-    }
-
-    const missingWorkLogs = await prisma.workLog.findMany({
-        where: {
-            projectId,
-            detectionRecord: null,
-        },
-        orderBy: [
-            { workDate: 'asc' },
-            { id: 'asc' },
-        ],
-        select: {
-            id: true,
-        },
-    });
-
-    for (const log of missingWorkLogs) {
-        await syncDetectionRecordFromWorkLog(log.id);
     }
 
     const project = await prisma.project.findUnique({
@@ -154,12 +152,64 @@ export async function GET(_request, { params }) {
         isEdited: computeDetectionDrift(record),
     }));
 
-    const siblingProjects = await getSiblingProjects(project.contractId);
+    const [siblingProjects, missingDetectionRecordCount] = await Promise.all([
+        getSiblingProjects(project.contractId),
+        getMissingDetectionRecordCount(projectId),
+    ]);
 
     return NextResponse.json({
         ...project,
         buildingSummaries: buildBuildingSummaries(project.workLogs),
         detectionRecords,
         siblingProjects,
+        repairNeeded: missingDetectionRecordCount > 0,
+        missingDetectionRecordCount,
     });
+}
+
+export async function PUT(request, { params }) {
+    const { id } = await params;
+    const projectId = Number.parseInt(id, 10);
+    if (Number.isNaN(projectId)) {
+        return NextResponse.json({ error: '无效项目 ID' }, { status: 400 });
+    }
+
+    const body = await request.json();
+    if (!Object.prototype.hasOwnProperty.call(body || {}, 'noContractExpected')) {
+        return NextResponse.json({ error: '缺少 noContractExpected 字段' }, { status: 400 });
+    }
+
+    const existingProject = await prisma.project.findUnique({
+        where: { id: projectId },
+        select: {
+            id: true,
+            contractId: true,
+            noContractExpected: true,
+        },
+    });
+
+    if (!existingProject) {
+        return NextResponse.json({ error: '项目不存在' }, { status: 404 });
+    }
+
+    const nextNoContractExpected = normalizeNoContractExpected(
+        body.noContractExpected,
+        Boolean(existingProject.noContractExpected),
+    );
+
+    if (existingProject.contractId && nextNoContractExpected) {
+        return NextResponse.json({ error: '已关联合同的项目不能标记为无需合同' }, { status: 400 });
+    }
+
+    const project = await prisma.project.update({
+        where: { id: projectId },
+        data: {
+            noContractExpected: nextNoContractExpected,
+        },
+        include: {
+            contract: true,
+        },
+    });
+
+    return NextResponse.json(project);
 }

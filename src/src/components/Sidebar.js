@@ -2,8 +2,9 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { useEffect, useMemo, useState } from 'react';
 
-const navSections = [
+const baseNavSections = [
     {
         title: 'Command Layer',
         items: [
@@ -19,7 +20,7 @@ const navSections = [
             { href: '/contracts', code: 'CTR', label: '合同管理', note: '合同识别、批量导入与价目表' },
             { href: '/master/staff', code: 'STF', label: '人员管理', note: '人员档案与角色信息' },
             { href: '/master/projects', code: 'PRJ', label: '项目管理', note: '项目状态、阶段与合同关联' },
-            // { href: '/master/prices', code: 'PRC', label: '单价管理', note: '内部指导价与回退策略' },
+            { href: '/master/inbox', code: 'BOX', label: '异常处理', note: '集中处理数量、人员、合同和产值异常' },
             { href: '/master/models', code: 'API', label: '模型 API', note: '统一管理 OCR 与推理模型' },
         ],
     },
@@ -27,6 +28,50 @@ const navSections = [
 
 export default function Sidebar() {
     const pathname = usePathname();
+    const [inboxCount, setInboxCount] = useState(0);
+
+    const refreshInboxCount = async () => {
+        try {
+            const response = await fetch(`/api/inbox/exceptions?page=1&pageSize=1&_t=${Date.now()}`, {
+                cache: 'no-store',
+            });
+            const data = await response.json();
+            if (!response.ok) {
+                throw new Error(data.error || 'load inbox count failed');
+            }
+
+            setInboxCount(Number(data?.counts?.total || 0));
+        } catch (error) {
+            console.error('Load inbox count failed:', error);
+        }
+    };
+
+    useEffect(() => {
+        void refreshInboxCount();
+    }, [pathname]);
+
+    useEffect(() => {
+        const handleRefresh = () => {
+            void refreshInboxCount();
+        };
+
+        window.addEventListener('focus', handleRefresh);
+        window.addEventListener('inbox-updated', handleRefresh);
+
+        return () => {
+            window.removeEventListener('focus', handleRefresh);
+            window.removeEventListener('inbox-updated', handleRefresh);
+        };
+    }, []);
+
+    const navSections = useMemo(() => baseNavSections.map((section) => ({
+        ...section,
+        items: section.items.map((item) => (
+            item.href === '/master/inbox'
+                ? { ...item, badge: inboxCount }
+                : item
+        )),
+    })), [inboxCount]);
 
     return (
         <aside className="sidebar">
@@ -60,6 +105,9 @@ export default function Sidebar() {
                                         <span className="nav-label">{item.label}</span>
                                         <span className="nav-note">{item.note}</span>
                                     </span>
+                                    {item.badge > 0 ? (
+                                        <span className="sidebar-badge">{item.badge}</span>
+                                    ) : null}
                                 </Link>
                             );
                         })}

@@ -64,6 +64,7 @@ function getStatusClass(tone) {
 
 function buildAllocationItemFromLog(log) {
     const contract = log.project?.contract;
+    const pricingMode = normalizePricingMode(contract?.pricingMode);
     return {
         workLogId: log.id,
         contractId: contract?.id || null,
@@ -75,9 +76,12 @@ function buildAllocationItemFromLog(log) {
         quantity: Number(log.quantity || 0),
         unit: log.unit || '',
         remarks: log.remarks || '',
+        pricingMode,
         allocationShare: log.allocationShare,
-        contractAmount: Number(contract?.areaPricingAmount || contract?.lumpSumAmount || 0),
-        contractArea: contract?.areaPricingArea === null || contract?.areaPricingArea === undefined
+        contractAmount: pricingMode === 'area'
+            ? Number(contract?.areaPricingAmount || 0)
+            : Number(contract?.lumpSumAmount || contract?.areaPricingAmount || 0),
+        contractArea: pricingMode !== 'area' || contract?.areaPricingArea === null || contract?.areaPricingArea === undefined
             ? null
             : Number(contract.areaPricingArea),
         staffNames: getStaffNames(log),
@@ -102,7 +106,7 @@ function buildSplitState(log) {
     return {
         id: log.id,
         originalQuantity: Number(log.quantity || 0),
-        splitQuantity: '',
+        splitQuantity: String(log.quantity ?? ''),
         workDate: formatDateInput(log.workDate),
         projectName: buildWorkLogProjectDisplayName(log, { warnOnConflict: true }),
         testContent: log.testContent || '',
@@ -116,7 +120,41 @@ function buildSplitState(log) {
 
 function supportsAllocationShare(log) {
     const pricingMode = normalizePricingMode(log?.project?.contract?.pricingMode);
-    return pricingMode === 'area' || pricingMode === 'lumpsum';
+    return pricingMode === 'area' || pricingMode === 'mixed' || pricingMode === 'lumpsum';
+}
+
+function getAllocationDialogMeta(item) {
+    const pricingMode = normalizePricingMode(item?.pricingMode);
+    if (pricingMode === 'lumpsum') {
+        return {
+            kicker: 'Lump Sum Contract',
+            note: '该项目合同按包干价计费。请确认这条工作记录对应的合同占比，系统会按包干总价自动折算产值。',
+            amountLabel: '包干总价',
+            areaLabel: null,
+            fieldLabel: '本次工作占包干总价比例 (%)',
+            fieldNote: '例如填写 `3.5`，系统会按包干总价的 3.5% 计算本次产值，再在参与人员之间均分。',
+        };
+    }
+
+    if (pricingMode === 'mixed') {
+        return {
+            kicker: 'Mixed Contract',
+            note: '该项目合同为混合计费。这里确认的是打包部分占比；保存后系统会按打包部分总价自动折算这条记录的产值。',
+            amountLabel: '打包部分总价',
+            areaLabel: null,
+            fieldLabel: '本次工作占打包部分比例 (%)',
+            fieldNote: '例如填写 `3.5`，系统会按打包部分总价的 3.5% 计算本次产值；如果留空，则仍可按单价规则处理。',
+        };
+    }
+
+    return {
+        kicker: 'Area Contract',
+        note: '该项目合同按面积计价。请确认本次检测对应的合同占比，系统会按合同总金额自动折算产值。',
+        amountLabel: '合同总金额',
+        areaLabel: '合同面积',
+        fieldLabel: '本次检测占合同金额比例 (%)',
+        fieldNote: '例如填写 `3.5`，系统会按合同总金额的 3.5% 计算本次检测产值，再在参与人员之间均分。',
+    };
 }
 
 function handleBlurOnEnter(event) {
@@ -136,6 +174,190 @@ function resizeTextarea(target) {
     element.style.height = `${element.scrollHeight}px`;
 }
 
+function formatMatchScore(score) {
+    return `${Math.round(Number(score || 0) * 100)}%`;
+}
+
+function getPreviewStatusMeta(status) {
+    if (status === 'exact') {
+        return {
+            className: 'badge badge-success',
+            label: '精确匹配',
+        };
+    }
+    if (status === 'fuzzy') {
+        return {
+            className: 'badge badge-warning',
+            label: '近似候选',
+        };
+    }
+    return {
+        className: 'badge badge-danger',
+        label: '全新项目',
+    };
+}
+
+function buildDefaultPreviewAssignment(row) {
+    const resolution = row?.resolution || {};
+    if (resolution.status === 'exact' && resolution.exactProjectId) {
+        if (resolution.matchedAs === 'building' && resolution.buildingName) {
+            return {
+                selection: `exact-building:${resolution.exactProjectId}`,
+                decision: 'use-existing-as-building',
+                projectId: resolution.exactProjectId,
+                buildingName: resolution.buildingName,
+                locked: true,
+            };
+        }
+
+        return {
+            selection: `exact:${resolution.exactProjectId}`,
+            decision: 'use-existing',
+            projectId: resolution.exactProjectId,
+            locked: true,
+        };
+    }
+
+    if (resolution.status === 'fuzzy' && resolution.candidates?.length > 0) {
+        const firstCandidate = resolution.candidates[0];
+        if (firstCandidate.matchedAs !== 'project' && firstCandidate.buildingName) {
+            return {
+                selection: `building:${firstCandidate.projectId}`,
+                decision: 'use-existing-as-building',
+                projectId: firstCandidate.projectId,
+                buildingName: firstCandidate.buildingName,
+            };
+        }
+
+        return {
+            selection: `existing:${firstCandidate.projectId}`,
+            decision: 'use-existing',
+            projectId: firstCandidate.projectId,
+        };
+    }
+
+    return {
+        selection: 'create-new',
+        decision: 'create-new',
+        projectName: row?.projectName || '',
+    };
+}
+
+function buildPreviewSelectOptions(row, projectOptions) {
+    const resolution = row?.resolution || {};
+    if (resolution.status === 'exact' && resolution.exactProjectId) {
+        return [
+            {
+                value: resolution.matchedAs === 'building' ? `exact-building:${resolution.exactProjectId}` : `exact:${resolution.exactProjectId}`,
+                label: resolution.matchedAs === 'building'
+                    ? `使用匹配项目：${resolution.exactProjectDisplayName || `#${resolution.exactProjectId}`}（单体：${resolution.buildingName}）`
+                    : `使用匹配项目：${resolution.exactProjectDisplayName || `#${resolution.exactProjectId}`}`,
+                decision: resolution.matchedAs === 'building' ? 'use-existing-as-building' : 'use-existing',
+                projectId: resolution.exactProjectId,
+                buildingName: resolution.buildingName || '',
+            },
+        ];
+    }
+
+    if (resolution.status === 'fuzzy') {
+        return [
+            ...(resolution.candidates || []).slice(0, 3).map((candidate) => ({
+                value: candidate.matchedAs !== 'project' ? `building:${candidate.projectId}` : `existing:${candidate.projectId}`,
+                label: candidate.matchedAs !== 'project'
+                    ? `${candidate.projectDisplayName}（建议单体：${candidate.buildingName}，相似度 ${formatMatchScore(candidate.score)}）`
+                    : `${candidate.projectDisplayName}（相似度 ${formatMatchScore(candidate.score)}）`,
+                decision: candidate.matchedAs !== 'project' ? 'use-existing-as-building' : 'use-existing',
+                projectId: candidate.projectId,
+                buildingName: candidate.buildingName || '',
+            })),
+            {
+                value: 'create-new',
+                label: '作为全新项目新建',
+                decision: 'create-new',
+            },
+        ];
+    }
+
+    return [
+        ...projectOptions.map((project) => ({
+            value: `existing:${project.id}`,
+            label: `使用已有项目：${project.projectDisplayName}`,
+            decision: 'use-existing',
+            projectId: project.id,
+            buildingName: '',
+        })),
+        {
+            value: 'create-new',
+            label: '作为全新项目新建',
+            decision: 'create-new',
+        },
+    ];
+}
+
+function resolveInboxJumpContext(logs) {
+    if (typeof window === 'undefined') {
+        return null;
+    }
+
+    const params = new URLSearchParams(window.location.search);
+    const projectName = normalizeTextInput(params.get('projectName'));
+    const exceptionType = normalizeTextInput(params.get('exceptionType'));
+    const focusWorkLogId = Number.parseInt(params.get('focusWorkLogId') || '', 10);
+    const projectId = Number.parseInt(params.get('projectId') || '', 10);
+    const hasContext = (
+        projectName
+        || exceptionType
+        || Number.isInteger(focusWorkLogId)
+        || Number.isInteger(projectId)
+    );
+
+    if (!hasContext) {
+        return null;
+    }
+
+    const matchedLog = logs.find((log) => {
+        if (Number.isInteger(focusWorkLogId) && log.id === focusWorkLogId) {
+            return true;
+        }
+
+        if (Number.isInteger(projectId) && log.project?.id === projectId) {
+            return true;
+        }
+
+        if (!projectName) {
+            return false;
+        }
+
+        const projectDisplayName = buildProjectDisplayName(log.project);
+        const workLogDisplayName = buildWorkLogProjectDisplayName(log, { warnOnConflict: true });
+        return projectDisplayName === projectName || workLogDisplayName === projectName;
+    }) || null;
+
+    const projectFilter = matchedLog ? buildProjectDisplayName(matchedLog.project) : '';
+    const selectedIds = Number.isInteger(focusWorkLogId) && logs.some((log) => log.id === focusWorkLogId)
+        ? [focusWorkLogId]
+        : (matchedLog?.id ? [matchedLog.id] : []);
+    const noteParts = [];
+
+    if (projectFilter) {
+        noteParts.push(`项目：${projectFilter}`);
+    }
+    if (exceptionType === 'exceeded') {
+        noteParts.push('状态：产值超限');
+    } else if (exceptionType) {
+        noteParts.push(`状态：${exceptionType}`);
+    }
+
+    return {
+        filters: {
+            ...(projectFilter ? { project: projectFilter } : {}),
+            ...(exceptionType ? { status: exceptionType } : {}),
+        },
+        selectedIds,
+        note: noteParts.length > 0 ? `来自异常收件箱，已按${noteParts.join('，')}筛到相关记录。` : '来自异常收件箱，已定位到相关工作记录。',
+    };
+}
+
 export default function WorkLogPage() {
     const router = useRouter();
     const [rawText, setRawText] = useState('');
@@ -146,6 +368,9 @@ export default function WorkLogPage() {
     const [parsingText, setParsingText] = useState(false);
     const [uploadingFile, setUploadingFile] = useState(false);
     const [selectedFile, setSelectedFile] = useState(null);
+    const [importPreview, setImportPreview] = useState(null);
+    const [previewAssignments, setPreviewAssignments] = useState({});
+    const [confirmingImport, setConfirmingImport] = useState(false);
     const [editorVersion, setEditorVersion] = useState(0);
     const [editingLog, setEditingLog] = useState(null);
     const [savingEdit, setSavingEdit] = useState(false);
@@ -159,10 +384,13 @@ export default function WorkLogPage() {
     const [submittingAllocation, setSubmittingAllocation] = useState(false);
     const [filters, setFilters] = useState({
         project: '',
+        status: '',
         staff: '',
         date: '',
         search: '',
     });
+    const [jumpNotice, setJumpNotice] = useState('');
+    const [jumpContextApplied, setJumpContextApplied] = useState(false);
 
     const refreshLogs = async () => {
         const response = await fetch(`/api/worklog?_t=${Date.now()}`, { cache: 'no-store' });
@@ -198,6 +426,29 @@ export default function WorkLogPage() {
             cancelled = true;
         };
     }, []);
+
+    useEffect(() => {
+        if (jumpContextApplied || logs.length === 0) {
+            return;
+        }
+
+        const context = resolveInboxJumpContext(logs);
+        setJumpContextApplied(true);
+        if (!context) {
+            return;
+        }
+
+        setFilters((current) => ({
+            ...current,
+            ...context.filters,
+        }));
+        if (context.selectedIds.length > 0) {
+            setSelectedIds(context.selectedIds);
+        }
+        if (context.note) {
+            setJumpNotice(context.note);
+        }
+    }, [jumpContextApplied, logs]);
 
     const queuePendingAllocations = (items) => {
         const pendingItems = (Array.isArray(items) ? items : []).filter((item) => item?.workLogId);
@@ -252,6 +503,29 @@ export default function WorkLogPage() {
         queuePendingAllocations(data.pendingAllocations);
     };
 
+    const clearPreviewState = () => {
+        setImportPreview(null);
+        setPreviewAssignments({});
+    };
+
+    const applyPreviewResult = async (response) => {
+        const data = await response.json();
+        if (!response.ok) {
+            throw new Error(data.error || '预览失败');
+        }
+
+        const rows = Array.isArray(data.rows) ? data.rows : [];
+        setImportPreview({
+            ...data,
+            rows,
+            errors: Array.isArray(data.errors) ? data.errors : [],
+            projectOptions: Array.isArray(data.projectOptions) ? data.projectOptions : [],
+        });
+        setPreviewAssignments(Object.fromEntries(
+            rows.map((row) => [row.rowIndex, buildDefaultPreviewAssignment(row)]),
+        ));
+    };
+
     const handleParse = async () => {
         if (!rawText.trim()) {
             return;
@@ -259,15 +533,19 @@ export default function WorkLogPage() {
 
         setParsingText(true);
         try {
-            const response = await fetch('/api/worklog', {
+            const response = await fetch('/api/worklog?mode=preview', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ rawText }),
             });
-            await applyImportResult(response);
-            setRawText('');
+            await applyPreviewResult(response);
         } catch (error) {
-            setResult({ errors: [{ message: `请求失败：${error.message}` }], saved: 0 });
+            setImportPreview({
+                rows: [],
+                errors: [{ message: `预览失败：${error.message}` }],
+                projectOptions: [],
+                statusCounts: { exact: 0, fuzzy: 0, none: 0 },
+            });
         } finally {
             setParsingText(false);
         }
@@ -283,16 +561,119 @@ export default function WorkLogPage() {
             const formData = new FormData();
             formData.append('file', selectedFile);
 
-            const response = await fetch('/api/worklog', {
+            const response = await fetch('/api/worklog?mode=preview', {
                 method: 'POST',
                 body: formData,
             });
+            await applyPreviewResult(response);
+        } catch (error) {
+            setImportPreview({
+                rows: [],
+                errors: [{ message: `预览失败：${error.message}` }],
+                projectOptions: [],
+                statusCounts: { exact: 0, fuzzy: 0, none: 0 },
+            });
+        } finally {
+            setUploadingFile(false);
+        }
+    };
+
+    const handlePreviewAssignmentChange = (row, selection) => {
+        const options = buildPreviewSelectOptions(row, importPreview?.projectOptions || []);
+        const matchedOption = options.find((item) => item.value === selection);
+
+        if (!matchedOption) {
+            return;
+        }
+
+        setPreviewAssignments((current) => ({
+            ...current,
+            [row.rowIndex]: matchedOption.decision === 'create-new'
+                ? {
+                    selection,
+                    decision: 'create-new',
+                    projectName: row.projectName || '',
+                }
+                : {
+                    selection,
+                    decision: matchedOption.decision,
+                    projectId: matchedOption.projectId,
+                    buildingName: matchedOption.buildingName || '',
+                },
+        }));
+    };
+
+    const handlePreviewAssignmentFieldChange = (rowIndex, key, value) => {
+        setPreviewAssignments((current) => ({
+            ...current,
+            [rowIndex]: {
+                ...(current[rowIndex] || {}),
+                [key]: value,
+            },
+        }));
+    };
+
+    const handleConfirmImport = async () => {
+        if (!importPreview) {
+            return;
+        }
+
+        const previewRows = importPreview.rows || [];
+        const commitRows = previewRows.map(({ resolution, ...row }) => row);
+        const rowAssignments = previewRows
+            .map((previewRow) => {
+                const assignment = previewAssignments[previewRow.rowIndex];
+                if (!assignment || previewRow.error || previewRow.resolution?.status === 'exact') {
+                    return null;
+                }
+
+                if (assignment.decision === 'use-existing') {
+                    return {
+                        rowIndex: previewRow.rowIndex,
+                        decision: 'use-existing',
+                        projectId: assignment.projectId,
+                    };
+                }
+
+                if (assignment.decision === 'use-existing-as-building') {
+                    return {
+                        rowIndex: previewRow.rowIndex,
+                        decision: 'use-existing-as-building',
+                        projectId: assignment.projectId,
+                        buildingName: assignment.buildingName,
+                    };
+                }
+
+                return {
+                    rowIndex: previewRow.rowIndex,
+                    decision: 'create-new',
+                    projectName: assignment.projectName || previewRow.projectName,
+                };
+            })
+            .filter(Boolean);
+
+        setConfirmingImport(true);
+        try {
+            const response = await fetch('/api/worklog?mode=commit', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    source: importPreview.source,
+                    fileName: importPreview.fileName,
+                    sheetName: importPreview.sheetName,
+                    originalRows: importPreview.originalRows,
+                    rows: commitRows,
+                    rowAssignments,
+                }),
+            });
             await applyImportResult(response);
+            clearPreviewState();
+            setRawText('');
             setSelectedFile(null);
         } catch (error) {
             setResult({ errors: [{ message: `导入失败：${error.message}` }], saved: 0 });
         } finally {
-            setUploadingFile(false);
+            setConfirmingImport(false);
         }
     };
 
@@ -544,11 +925,6 @@ export default function WorkLogPage() {
     };
 
     const handleOpenSplit = (log) => {
-        if (Number(log.quantity || 0) <= 0) {
-            alert('这条记录的数量不能拆分，请先把数量改成大于 0');
-            return;
-        }
-
         setSplittingLog(buildSplitState(log));
     };
 
@@ -557,10 +933,9 @@ export default function WorkLogPage() {
             return;
         }
 
-        const totalQuantity = Number(splittingLog.originalQuantity || 0);
         const splitQuantity = Number.parseFloat(splittingLog.splitQuantity);
-        if (!Number.isFinite(splitQuantity) || splitQuantity <= 0 || splitQuantity >= totalQuantity) {
-            alert('拆出数量必须大于 0，并且小于原数量');
+        if (!Number.isFinite(splitQuantity) || splitQuantity < 0) {
+            alert('新记录数量必须大于或等于 0');
             return;
         }
 
@@ -570,7 +945,7 @@ export default function WorkLogPage() {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    splitQuantity,
+                    quantity: splitQuantity,
                     workDate: splittingLog.workDate,
                     projectName: splittingLog.projectName,
                     testContent: splittingLog.testContent,
@@ -641,6 +1016,12 @@ export default function WorkLogPage() {
     const staffOptions = useMemo(() => Array.from(
         new Set(logs.flatMap((log) => getStaffNames(log))),
     ).sort((a, b) => a.localeCompare(b, 'zh-CN')), [logs]);
+    const statusOptions = useMemo(() => Array.from(
+        new Map(logs.map((log) => {
+            const state = getWorklogBillingState(log);
+            return [state.code, { value: state.code, label: state.label }];
+        })).values(),
+    ), [logs]);
 
     const filteredLogs = useMemo(() => logs.filter((log) => {
         const projectName = buildProjectDisplayName(log.project);
@@ -648,9 +1029,13 @@ export default function WorkLogPage() {
         const staffNames = getStaffNames(log).join('、');
         const workDate = new Date(log.workDate).toISOString().slice(0, 10);
         const totalValue = sumProductionValues(log);
-        const haystack = `${projectName} ${displayProjectName} ${log.testContent} ${staffNames} ${log.remarks || ''} ${log.buildingName || ''} ${totalValue}`.toLowerCase();
+        const billingState = getWorklogBillingState(log);
+        const haystack = `${log.id} ${projectName} ${displayProjectName} ${log.testContent} ${staffNames} ${log.remarks || ''} ${log.buildingName || ''} ${totalValue}`.toLowerCase();
 
         if (filters.project && projectName !== filters.project) {
+            return false;
+        }
+        if (filters.status && billingState.code !== filters.status) {
             return false;
         }
         if (filters.staff && !getStaffNames(log).includes(filters.staff)) {
@@ -676,6 +1061,11 @@ export default function WorkLogPage() {
         const state = getWorklogBillingState(log);
         return state.code === 'workload-only' || state.code === 'no-contract-manual';
     }).length;
+    const previewRows = importPreview?.rows || [];
+    const previewErrors = importPreview?.errors || [];
+    const previewValidCount = previewRows.length;
+    const previewStatusCounts = importPreview?.statusCounts || { exact: 0, fuzzy: 0, none: 0 };
+    const allocationDialogMeta = getAllocationDialogMeta(activeAllocation);
 
     return (
         <>
@@ -726,7 +1116,7 @@ export default function WorkLogPage() {
                             <div className="panel-copy">
                                 <div className="panel-eyebrow">Workbook Intake</div>
                                 <div className="panel-title">Excel / WPS 文件导入</div>
-                                <div className="panel-note">支持 `.xlsx` / `.xls`，导入后会自动尝试计价；面积合同会进入占比确认队列。</div>
+                                <div className="panel-note">支持 `.xlsx` / `.xls`。现在会先预览项目匹配结果，确认后再正式导入。</div>
                             </div>
                         </div>
 
@@ -737,14 +1127,17 @@ export default function WorkLogPage() {
                                     id="workbook-file"
                                     type="file"
                                     accept=".xlsx,.xls"
-                                    onChange={(event) => setSelectedFile(event.target.files?.[0] || null)}
+                                    onChange={(event) => {
+                                        setSelectedFile(event.target.files?.[0] || null);
+                                        clearPreviewState();
+                                    }}
                                 />
                             </div>
                         </div>
 
                         <div className="action-row mt-4">
                             <button className="btn btn-primary" onClick={handleImportFile} disabled={!selectedFile || uploadingFile}>
-                                {uploadingFile ? '导入中' : '导入 Excel'}
+                                {uploadingFile ? '预览中' : '预览导入'}
                             </button>
                             {selectedFile && <span className="ghost-note">已选择：{selectedFile.name}</span>}
                         </div>
@@ -755,27 +1148,140 @@ export default function WorkLogPage() {
                             <div className="panel-copy">
                                 <div className="panel-eyebrow">Manual Intake</div>
                                 <div className="panel-title">WPS 粘贴导入</div>
-                                <div className="panel-note">字段顺序：日期、项目、检测内容、数量、人员、备注。</div>
+                                <div className="panel-note">字段顺序：日期、项目、检测内容、数量、人员、备注。现在会先预览，再确认导入。</div>
                             </div>
                         </div>
 
                         <textarea
                             className="form-textarea"
                             value={rawText}
-                            onChange={(event) => setRawText(event.target.value)}
+                            onChange={(event) => {
+                                setRawText(event.target.value);
+                                clearPreviewState();
+                            }}
                             placeholder={'2026-03-18\t建宁路西段\t轻型动力触探\t10点\t张三、李四\t3#楼东侧'}
                         />
 
                         <div className="action-row mt-4">
                             <button className="btn btn-primary" onClick={handleParse} disabled={parsingText || !rawText.trim()}>
-                                {parsingText ? '解析中' : '解析并保存'}
+                                {parsingText ? '预览中' : '预览导入'}
                             </button>
-                            <button className="btn btn-secondary" onClick={() => { setRawText(''); setResult(null); }}>
+                            <button className="btn btn-secondary" onClick={() => { setRawText(''); setResult(null); clearPreviewState(); }}>
                                 清空
                             </button>
                         </div>
                     </section>
                 </div>
+
+                {importPreview && (
+                    <div className="card">
+                        <div className="panel-top">
+                            <div className="panel-copy">
+                                <div className="panel-eyebrow">Import Preview</div>
+                                <div className="panel-title">导入预览</div>
+                                <div className="panel-note">
+                                    当前预览来自{importPreview.source === 'file' ? '文件导入' : '粘贴导入'}。
+                                    可确认 {previewValidCount} 条，精确匹配 {previewStatusCounts.exact || 0} 条，近似候选 {previewStatusCounts.fuzzy || 0} 条，全新项目 {previewStatusCounts.none || 0} 条。
+                                </div>
+                            </div>
+                        </div>
+
+                        <div className="chip-row">
+                            <span className="badge badge-success">Exact {previewStatusCounts.exact || 0}</span>
+                            <span className="badge badge-warning">Fuzzy {previewStatusCounts.fuzzy || 0}</span>
+                            <span className="badge badge-danger">New {previewStatusCounts.none || 0}</span>
+                            {typeof importPreview.originalRows === 'number' && <span className="badge badge-info">Rows {importPreview.originalRows}</span>}
+                            {typeof importPreview.expandedItems === 'number' && <span className="badge badge-info">Expanded {importPreview.expandedItems}</span>}
+                            {previewErrors.length > 0 && <span className="badge badge-danger">Errors {previewErrors.length}</span>}
+                        </div>
+
+                        {previewValidCount > 0 && (
+                            <div className="data-table-shell mt-4">
+                                <table className="data-table" style={{ minWidth: 1280 }}>
+                                    <thead>
+                                        <tr>
+                                            <th style={{ width: 80 }}>行号</th>
+                                            <th style={{ width: 120 }}>日期</th>
+                                            <th style={{ width: 280 }}>原始项目名</th>
+                                            <th style={{ width: 260 }}>检测内容</th>
+                                            <th style={{ width: 120 }}>数量</th>
+                                            <th style={{ width: 120 }}>状态</th>
+                                            <th style={{ width: 420 }}>决策</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {previewRows.map((row) => {
+                                            const statusMeta = getPreviewStatusMeta(row.resolution?.status);
+                                            const assignment = previewAssignments[row.rowIndex] || buildDefaultPreviewAssignment(row);
+                                            const decisionOptions = buildPreviewSelectOptions(row, importPreview.projectOptions || []);
+
+                                            return (
+                                                <tr key={`preview-${row.rowIndex}`}>
+                                                    <td>{row.rowIndex}</td>
+                                                    <td>{row.workDate || '-'}</td>
+                                                    <td>{row.projectName || '-'}</td>
+                                                    <td>{row.testContent || '-'}</td>
+                                                    <td>{`${formatNumber(row.quantity)}${row.unit || ''}`}</td>
+                                                    <td><span className={statusMeta.className}>{statusMeta.label}</span></td>
+                                                    <td>
+                                                        <div className="stack-sm">
+                                                            <select
+                                                                className="form-select"
+                                                                value={assignment.selection || 'create-new'}
+                                                                onChange={(event) => handlePreviewAssignmentChange(row, event.target.value)}
+                                                                disabled={Boolean(assignment.locked)}
+                                                            >
+                                                                {decisionOptions.map((option) => (
+                                                                    <option key={`${row.rowIndex}-${option.value}`} value={option.value}>
+                                                                        {option.label}
+                                                                    </option>
+                                                                ))}
+                                                            </select>
+                                                            {assignment.decision === 'create-new' && (
+                                                                <input
+                                                                    className="form-input"
+                                                                    value={assignment.projectName || row.projectName || ''}
+                                                                    onChange={(event) => handlePreviewAssignmentFieldChange(row.rowIndex, 'projectName', event.target.value)}
+                                                                    placeholder="请输入新项目名称"
+                                                                />
+                                                            )}
+                                                            {assignment.decision === 'use-existing-as-building' && (
+                                                                <input
+                                                                    className="form-input"
+                                                                    value={assignment.buildingName || ''}
+                                                                    onChange={(event) => handlePreviewAssignmentFieldChange(row.rowIndex, 'buildingName', event.target.value)}
+                                                                    placeholder="请输入单体名称"
+                                                                    disabled={Boolean(assignment.locked)}
+                                                                />
+                                                            )}
+                                                        </div>
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                    </tbody>
+                                </table>
+                            </div>
+                        )}
+
+                        {previewErrors.length > 0 && (
+                            <div className="mt-4" style={{ display: 'grid', gap: '10px' }}>
+                                {previewErrors.map((item, index) => (
+                                    <div key={`${item.rowIndex || 'p'}-${index}`} className="alert alert-danger">
+                                        {item.message} {item.raw ? `| ${item.raw}` : ''}
+                                    </div>
+                                ))}
+                            </div>
+                        )}
+
+                        <div className="action-row mt-4">
+                            <button className="btn btn-primary" onClick={handleConfirmImport} disabled={!previewValidCount || confirmingImport}>
+                                {confirmingImport ? '导入中' : `确认导入 ${previewValidCount} 条`}
+                            </button>
+                            <button className="btn btn-secondary" onClick={clearPreviewState}>取消预览</button>
+                        </div>
+                    </div>
+                )}
 
                 {result && (
                     <div className="card">
@@ -825,6 +1331,12 @@ export default function WorkLogPage() {
                     </div>
                 )}
 
+                {jumpNotice ? (
+                    <div className="alert alert-warning" style={{ marginBottom: 16 }}>
+                        {jumpNotice}
+                    </div>
+                ) : null}
+
                 <section className="filter-bar">
                     <div className="filter-stack">
                         <label className="form-label" htmlFor="filter-project">项目</label>
@@ -836,6 +1348,18 @@ export default function WorkLogPage() {
                         >
                             <option value="">全部项目</option>
                             {projectOptions.map((item) => <option key={item} value={item}>{item}</option>)}
+                        </select>
+                    </div>
+                    <div className="filter-stack">
+                        <label className="form-label" htmlFor="filter-status">状态</label>
+                        <select
+                            id="filter-status"
+                            className="form-select"
+                            value={filters.status}
+                            onChange={(event) => setFilters((current) => ({ ...current, status: event.target.value }))}
+                        >
+                            <option value="">全部状态</option>
+                            {statusOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
                         </select>
                     </div>
                     <div className="filter-stack">
@@ -1088,7 +1612,6 @@ export default function WorkLogPage() {
                                                         <button
                                                             className="btn btn-secondary"
                                                             onClick={() => handleOpenSplit(log)}
-                                                            disabled={Number(log.quantity || 0) <= 0}
                                                         >
                                                             拆分
                                                         </button>
@@ -1235,33 +1758,26 @@ export default function WorkLogPage() {
                             <div>
                                 <div className="page-kicker">Worklog Split</div>
                                 <div className="modal-title">拆分工作记录</div>
-                                <div className="modal-note">系统会保留原记录，把你填写的数量拆成一条新记录。拆分后如果原来有占比或手工产值，需要重新确认。</div>
+                                <div className="modal-note">系统会保留原记录原样不动，复制一份新的记录供你修改。新记录默认和原记录一模一样，下面所有字段都可以按需改。新记录的占比/手工产值需要重新确认。</div>
                             </div>
                             <button className="btn btn-secondary" onClick={() => setSplittingLog(null)}>关闭</button>
                         </div>
 
                         <div className="split-grid">
                             <div className="surface-item">
-                                <div className="surface-title">原数量</div>
+                                <div className="surface-title">原记录当前数量</div>
                                 <div className="surface-note">{formatNumber(splittingLog.originalQuantity)} {splittingLog.unit || ''}</div>
-                            </div>
-                            <div className="surface-item">
-                                <div className="surface-title">拆分后原记录剩余</div>
-                                <div className="surface-note">
-                                    {Number.isFinite(Number.parseFloat(splittingLog.splitQuantity))
-                                        ? `${formatNumber(Math.max(Number(splittingLog.originalQuantity || 0) - Number.parseFloat(splittingLog.splitQuantity || 0), 0))} ${splittingLog.unit || ''}`
-                                        : '-'}
-                                </div>
                             </div>
                         </div>
 
                         <div className="form-grid mt-4">
                             <div className="form-group">
-                                <label htmlFor="split-quantity">拆出数量</label>
+                                <label htmlFor="split-quantity">新记录数量</label>
                                 <input
                                     id="split-quantity"
                                     type="number"
                                     step="0.01"
+                                    min="0"
                                     className="form-input"
                                     value={splittingLog.splitQuantity}
                                     onChange={(event) => setSplittingLog((current) => ({ ...current, splitQuantity: event.target.value }))}
@@ -1487,9 +2003,9 @@ export default function WorkLogPage() {
                     <div className="modal-card" onClick={(event) => event.stopPropagation()}>
                         <div className="modal-header">
                             <div>
-                                <div className="page-kicker">Area Contract</div>
+                                <div className="page-kicker">{allocationDialogMeta.kicker}</div>
                                 <div className="modal-title">确认本次检测占比</div>
-                                <div className="modal-note">该项目合同按面积计价。请确认本次检测对应的合同占比，系统会按合同总金额自动折算产值。</div>
+                                <div className="modal-note">{allocationDialogMeta.note}</div>
                             </div>
                             <button className="btn btn-secondary" onClick={closeAllocationModal}>稍后处理</button>
                         </div>
@@ -1504,13 +2020,15 @@ export default function WorkLogPage() {
                                 <div className="surface-note">{activeAllocation.contractNo || '未填写'}</div>
                             </div>
                             <div className="surface-item">
-                                <div className="surface-title">合同总金额</div>
+                                <div className="surface-title">{allocationDialogMeta.amountLabel}</div>
                                 <div className="surface-note">{formatCurrency(activeAllocation.contractAmount)}</div>
                             </div>
-                            <div className="surface-item">
-                                <div className="surface-title">合同面积</div>
-                                <div className="surface-note">{activeAllocation.contractArea ? `${formatNumber(activeAllocation.contractArea)} ㎡` : '未填写'}</div>
-                            </div>
+                            {allocationDialogMeta.areaLabel && (
+                                <div className="surface-item">
+                                    <div className="surface-title">{allocationDialogMeta.areaLabel}</div>
+                                    <div className="surface-note">{activeAllocation.contractArea ? `${formatNumber(activeAllocation.contractArea)} ㎡` : '未填写'}</div>
+                                </div>
+                            )}
                         </div>
 
                         <div className="stack-sm mt-4">
@@ -1531,7 +2049,7 @@ export default function WorkLogPage() {
                         </div>
 
                         <div className="form-group mt-4">
-                            <label htmlFor="allocation-percent">本次检测占合同金额比例 (%)</label>
+                            <label htmlFor="allocation-percent">{allocationDialogMeta.fieldLabel}</label>
                             <input
                                 id="allocation-percent"
                                 type="number"
@@ -1541,7 +2059,7 @@ export default function WorkLogPage() {
                                 onChange={(event) => setAllocationPercent(event.target.value)}
                                 placeholder="例如 3.5"
                             />
-                            <div className="field-note">例如填写 `3.5`，系统会按合同总金额的 3.5% 计算本次检测产值，再在参与人员之间均分。</div>
+                            <div className="field-note">{allocationDialogMeta.fieldNote}</div>
                         </div>
 
                         <div className="modal-actions">

@@ -27,10 +27,6 @@ async function resolveStaffIds(staffNames = []) {
     return staffIds;
 }
 
-function roundQuantity(value) {
-    return Math.round(value * 1000000) / 1000000;
-}
-
 function buildPendingAllocationPayload(log) {
     const contract = log?.project?.contract;
     if (!contract?.id) {
@@ -38,7 +34,7 @@ function buildPendingAllocationPayload(log) {
     }
 
     const pricingMode = normalizePricingMode(contract.pricingMode);
-    if (pricingMode !== 'area' && pricingMode !== 'lumpsum') {
+    if (pricingMode !== 'area' && pricingMode !== 'mixed' && pricingMode !== 'lumpsum') {
         return null;
     }
 
@@ -62,9 +58,12 @@ function buildPendingAllocationPayload(log) {
         quantity,
         unit: log.unit || '',
         remarks: log.remarks || '',
+        pricingMode,
         allocationShare: log.allocationShare,
-        contractAmount: Number(contract.areaPricingAmount || contract.lumpSumAmount || 0),
-        contractArea: contract.areaPricingArea === null || contract.areaPricingArea === undefined
+        contractAmount: pricingMode === 'area'
+            ? Number(contract.areaPricingAmount || 0)
+            : Number(contract.lumpSumAmount || contract.areaPricingAmount || 0),
+        contractArea: pricingMode !== 'area' || contract.areaPricingArea === null || contract.areaPricingArea === undefined
             ? null
             : Number(contract.areaPricingArea),
         staffNames: (log.staffMembers || []).map((item) => item.staff?.name).filter(Boolean),
@@ -143,16 +142,20 @@ export async function POST(request, { params }) {
             return NextResponse.json({ error: '工作记录不存在' }, { status: 404 });
         }
 
-        const body = await request.json();
+        const body = await request.json().catch(() => ({}));
         const originalQuantity = Number.parseFloat(existingLog.quantity);
-        const splitQuantity = Number.parseFloat(body.splitQuantity);
+        const hasQuantityOverride = body.quantity !== undefined || body.splitQuantity !== undefined;
+        const nextQuantityRaw = body.quantity !== undefined ? body.quantity : body.splitQuantity;
+        const nextQuantity = hasQuantityOverride
+            ? Number.parseFloat(nextQuantityRaw)
+            : originalQuantity;
 
-        if (!Number.isFinite(originalQuantity) || originalQuantity <= 0) {
-            return NextResponse.json({ error: '原记录数量无效，不能拆分' }, { status: 400 });
+        if (!Number.isFinite(originalQuantity) || originalQuantity < 0) {
+            return NextResponse.json({ error: '原记录数量无效，不能复制副本' }, { status: 400 });
         }
 
-        if (!Number.isFinite(splitQuantity) || splitQuantity <= 0 || splitQuantity >= originalQuantity) {
-            return NextResponse.json({ error: '拆出数量必须大于 0，并且小于原数量' }, { status: 400 });
+        if (!Number.isFinite(nextQuantity) || nextQuantity < 0) {
+            return NextResponse.json({ error: '新记录数量必须大于或等于 0' }, { status: 400 });
         }
 
         const nextWorkDate = body.workDate ? new Date(body.workDate) : existingLog.workDate;
@@ -160,7 +163,7 @@ export async function POST(request, { params }) {
             return NextResponse.json({ error: '新记录日期无效' }, { status: 400 });
         }
 
-        const nextProjectName = typeof body.projectName === 'string'
+        const nextProjectName = typeof body.projectName === 'string' && body.projectName.trim()
             ? body.projectName.trim()
             : buildWorkLogProjectDisplayName(existingLog);
         const nextTestContent = typeof body.testContent === 'string' && body.testContent.trim()
@@ -181,30 +184,19 @@ export async function POST(request, { params }) {
         const nextProjectResolution = await findOrCreateProjectByDisplayName(nextProjectName, existingLog.projectId, prisma);
         const nextProject = nextProjectResolution.project;
         const nextStaffIds = await resolveStaffIds(nextStaffNames);
-        const remainingQuantity = roundQuantity(originalQuantity - splitQuantity);
 
         const result = await prisma.$transaction(async (tx) => {
-            await tx.workLog.update({
-                where: { id: worklogId },
-                data: {
-                    quantity: remainingQuantity,
-                    allocationShare: null,
-                    manualTotalValue: null,
-                    manualValueNote: null,
-                },
-            });
-
             const createdLog = await tx.workLog.create({
                 data: {
                     workDate: nextWorkDate,
                     projectId: nextProject?.id || null,
                     buildingName: nextProjectResolution.buildingName,
                     testContent: nextTestContent,
-                    quantity: splitQuantity,
+                    quantity: nextQuantity,
                     unit: nextUnit,
                     rawText: existingLog.rawText
-                        ? `${existingLog.rawText}\n[manual-split from #${existingLog.id}]`
-                        : `[manual-split from #${existingLog.id}]`,
+                        ? `${existingLog.rawText}\n[manual-copy from #${existingLog.id}]`
+                        : `[manual-copy from #${existingLog.id}]`,
                     remarks: nextRemarks,
                     allocationShare: null,
                     manualTotalValue: null,
@@ -220,10 +212,6 @@ export async function POST(request, { params }) {
                     })),
                 });
             }
-
-            await tx.productionValue.deleteMany({
-                where: { workLogId: worklogId },
-            });
 
             return {
                 createdLogId: createdLog.id,
@@ -242,10 +230,6 @@ export async function POST(request, { params }) {
 
         for (const projectId of rebuiltProjectIds) {
             await rebuildProjectProduction(projectId);
-        }
-
-        if (!result.originalProjectId) {
-            await recalculateStandaloneWorklog(worklogId);
         }
 
         if (!result.createdProjectId) {

@@ -5,11 +5,20 @@ import {
     findOrCreateProjectByDisplayName,
     findProjectByDisplayName,
 } from '@/lib/projectResolver';
+import {
+    analyzeProjectNameResolution,
+    buildProjectMatcherOption,
+    findFuzzyProjectCandidates,
+} from '@/lib/projectNameMatcher';
 import { calculateProductionValue } from '@/lib/productionCalculator';
 import { syncDetectionRecordFromWorkLog } from '@/lib/detectionRecordSync';
+import { normalizeAllocationShare, normalizePricingMode } from '@/lib/worklogBilling';
 import { expandWorklogRows, parseWPSWorkbook, parseWPSText } from '@/lib/wpsParser';
-
 import { NextResponse } from 'next/server';
+
+function normalizeText(value) {
+    return String(value ?? '').trim();
+}
 
 async function findOrCreateStaffIds(staffNames) {
     const staffIds = [];
@@ -26,12 +35,52 @@ async function findOrCreateStaffIds(staffNames) {
 }
 
 function buildPendingAllocationPayload(workLog, calculation) {
-    if (!calculation?.pendingAllocation) {
+    const fallbackPayload = (() => {
+        const contract = workLog?.project?.contract;
+        if (!contract?.id) {
+            return null;
+        }
+
+        const pricingMode = normalizePricingMode(contract.pricingMode);
+        if (pricingMode !== 'mixed') {
+            return null;
+        }
+
+        if (normalizeAllocationShare(workLog.allocationShare) !== null) {
+            return null;
+        }
+
+        const contractAmount = Number(contract.lumpSumAmount || contract.areaPricingAmount || 0);
+        const quantity = Number.parseFloat(workLog.quantity);
+        if (!Number.isFinite(contractAmount) || contractAmount <= 0 || !Number.isFinite(quantity) || quantity <= 0) {
+            return null;
+        }
+
+        return {
+            workLogId: workLog.id,
+            contractId: contract.id,
+            contractNo: contract.contractNo || '',
+            projectId: workLog.project?.id || null,
+            projectName: buildWorkLogProjectDisplayName(workLog),
+            workDate: workLog.workDate,
+            testContent: workLog.testContent,
+            quantity,
+            unit: workLog.unit || '',
+            remarks: workLog.remarks || '',
+            pricingMode,
+            allocationShare: workLog.allocationShare,
+            contractAmount,
+            contractArea: null,
+        };
+    })();
+
+    const payload = calculation?.pendingAllocation || fallbackPayload;
+    if (!payload) {
         return null;
     }
 
     return {
-        ...calculation.pendingAllocation,
+        ...payload,
         projectName: buildWorkLogProjectDisplayName(workLog),
         staffNames: (workLog.staffMembers || [])
             .map((item) => item.staff?.name)
@@ -39,10 +88,82 @@ function buildPendingAllocationPayload(workLog, calculation) {
     };
 }
 
-async function saveWorklogRow(row) {
-    const existingResolution = await findProjectByDisplayName(row.projectName, null, prisma);
-    const resolvedProject = await findOrCreateProjectByDisplayName(row.projectName, null, prisma);
-    const projectCreated = !existingResolution.project && Boolean(resolvedProject.project?.id);
+async function resolveProjectFromAssignment(row, assignment) {
+    if (!assignment?.decision) {
+        const existingResolution = await findProjectByDisplayName(row.projectName, null, prisma);
+        const resolvedProject = await findOrCreateProjectByDisplayName(row.projectName, null, prisma);
+        return {
+            resolvedProject,
+            projectCreated: !existingResolution.project && Boolean(resolvedProject.project?.id),
+        };
+    }
+
+    if (assignment.decision === 'use-existing') {
+        const projectId = Number.parseInt(assignment.projectId, 10);
+        if (Number.isNaN(projectId)) {
+            throw new Error(`第 ${row.rowIndex} 行缺少有效的目标项目`);
+        }
+
+        const project = await prisma.project.findUnique({
+            where: { id: projectId },
+        });
+        if (!project) {
+            throw new Error(`第 ${row.rowIndex} 行指定的项目 #${projectId} 不存在`);
+        }
+
+        return {
+            resolvedProject: {
+                project,
+                buildingName: null,
+            },
+            projectCreated: false,
+        };
+    }
+
+    if (assignment.decision === 'use-existing-as-building') {
+        const projectId = Number.parseInt(assignment.projectId, 10);
+        const buildingName = normalizeText(assignment.buildingName);
+        if (Number.isNaN(projectId)) {
+            throw new Error(`第 ${row.rowIndex} 行缺少有效的目标项目`);
+        }
+        if (!buildingName) {
+            throw new Error(`第 ${row.rowIndex} 行缺少单体名称`);
+        }
+
+        const project = await prisma.project.findUnique({
+            where: { id: projectId },
+        });
+        if (!project) {
+            throw new Error(`第 ${row.rowIndex} 行指定的项目 #${projectId} 不存在`);
+        }
+        if (!project.buildingMode) {
+            throw new Error(`第 ${row.rowIndex} 行指定的项目 #${projectId} 未开启单体建筑模式`);
+        }
+
+        return {
+            resolvedProject: {
+                project,
+                buildingName,
+            },
+            projectCreated: false,
+        };
+    }
+
+    if (assignment.decision === 'create-new') {
+        const targetProjectName = normalizeText(assignment.projectName) || row.projectName;
+        const existingResolution = await findProjectByDisplayName(targetProjectName, null, prisma);
+        const resolvedProject = await findOrCreateProjectByDisplayName(targetProjectName, null, prisma);
+        return {
+            resolvedProject,
+            projectCreated: !existingResolution.project && Boolean(resolvedProject.project?.id),
+        };
+    }
+
+    throw new Error(`第 ${row.rowIndex} 行的导入决策无效：${assignment.decision}`);
+}
+
+async function saveWorklogRow(row, assignment = null) {
+    const { resolvedProject, projectCreated } = await resolveProjectFromAssignment(row, assignment);
     const staffIds = await findOrCreateStaffIds(row.staffNames || []);
 
     const workLog = await prisma.workLog.create({
@@ -79,35 +200,42 @@ async function saveWorklogRow(row) {
     return { workLog, calculation, project: resolvedProject.project, projectCreated };
 }
 
-async function resolveImportRows(request) {
-    const contentType = request.headers.get('content-type') || '';
+async function resolveImportRowsFromFormData(formData) {
+    const file = formData.get('file');
+    if (!file) {
+        throw new Error('未上传工作日志文件');
+    }
 
-    if (contentType.includes('multipart/form-data')) {
-        const formData = await request.formData();
-        const file = formData.get('file');
-        if (!file) {
-            throw new Error('未上传工作日志文件');
-        }
+    const fileName = file.name || 'worklog.xlsx';
+    if (!/\.(xlsx|xls)$/i.test(fileName)) {
+        throw new Error('仅支持导入 .xlsx 或 .xls 文件');
+    }
 
-        const fileName = file.name || 'worklog.xlsx';
-        if (!/\.(xlsx|xls)$/i.test(fileName)) {
-            throw new Error('仅支持导入 .xlsx 或 .xls 文件');
-        }
+    const buffer = Buffer.from(await file.arrayBuffer());
+    const workbook = parseWPSWorkbook(buffer, fileName);
+    const expandedRows = await expandWorklogRows(workbook.rows);
 
-        const buffer = Buffer.from(await file.arrayBuffer());
-        const workbook = parseWPSWorkbook(buffer, fileName);
-        const expandedRows = await expandWorklogRows(workbook.rows);
+    return {
+        source: 'file',
+        fileName,
+        sheetName: workbook.sheetName,
+        originalRows: workbook.rows.length,
+        rows: expandedRows,
+    };
+}
 
+async function resolveImportRowsFromJson(body) {
+    if (Array.isArray(body?.rows)) {
         return {
-            source: 'file',
-            fileName,
-            sheetName: workbook.sheetName,
-            originalRows: workbook.rows.length,
-            rows: expandedRows,
+            source: body.source || 'preview',
+            fileName: body.fileName || null,
+            sheetName: body.sheetName || null,
+            originalRows: typeof body.originalRows === 'number' ? body.originalRows : body.rows.length,
+            rows: body.rows,
         };
     }
 
-    const { rawText } = await request.json();
+    const rawText = String(body?.rawText || '');
     const parsedRows = parseWPSText(rawText);
     const expandedRows = await expandWorklogRows(parsedRows);
 
@@ -116,6 +244,222 @@ async function resolveImportRows(request) {
         originalRows: parsedRows.length,
         rows: expandedRows,
     };
+}
+
+async function resolveImportRequest(request) {
+    const url = new URL(request.url);
+    const queryMode = url.searchParams.get('mode');
+    const contentType = request.headers.get('content-type') || '';
+
+    if (contentType.includes('multipart/form-data')) {
+        const formData = await request.formData();
+        return {
+            mode: queryMode || String(formData.get('mode') || '').trim() || null,
+            rowAssignments: [],
+            imported: await resolveImportRowsFromFormData(formData),
+        };
+    }
+
+    const body = await request.json().catch(() => ({}));
+    return {
+        mode: queryMode || body.mode || null,
+        rowAssignments: Array.isArray(body.rowAssignments) ? body.rowAssignments : [],
+        imported: await resolveImportRowsFromJson(body),
+    };
+}
+
+async function buildPreviewResponse(imported) {
+    const projects = await prisma.project.findMany({
+        select: {
+            id: true,
+            name: true,
+            phase: true,
+            buildingMode: true,
+            contractId: true,
+        },
+        orderBy: [
+            { name: 'asc' },
+            { id: 'asc' },
+        ],
+    });
+
+    const projectOptions = projects.map(buildProjectMatcherOption);
+    const previewRows = [];
+    const statusCounts = {
+        exact: 0,
+        fuzzy: 0,
+        none: 0,
+    };
+    const errors = [];
+
+    for (const row of imported.rows) {
+        if (row.error) {
+            errors.push(row);
+            continue;
+        }
+
+        const exactResolution = await findProjectByDisplayName(row.projectName, null, prisma);
+        if (exactResolution.project) {
+            const fuzzyCandidates = await findFuzzyProjectCandidates(row.projectName, {
+                projects,
+                limit: 5,
+                threshold: 0.75,
+            });
+            const competingCandidates = fuzzyCandidates.filter((candidate) => candidate.project.id !== exactResolution.project.id);
+
+            if (competingCandidates.length > 0) {
+                previewRows.push({
+                    ...row,
+                    resolution: {
+                        status: 'fuzzy',
+                        exactProjectId: exactResolution.project.id,
+                        candidates: [
+                            {
+                                projectId: exactResolution.project.id,
+                                projectDisplayName: buildProjectDisplayName(exactResolution.project),
+                                score: 1,
+                                matchedAs: exactResolution.buildingName ? 'building' : 'project',
+                                buildingName: exactResolution.buildingName || null,
+                            },
+                            ...competingCandidates.map((candidate) => ({
+                                projectId: candidate.project.id,
+                                projectDisplayName: buildProjectDisplayName(candidate.project),
+                                score: candidate.score,
+                                matchedAs: candidate.matchedAs,
+                                buildingName: candidate.buildingName || null,
+                            })),
+                        ].slice(0, 5),
+                    },
+                });
+                statusCounts.fuzzy += 1;
+                continue;
+            }
+
+            previewRows.push({
+                ...row,
+                resolution: {
+                    status: 'exact',
+                    exactProjectId: exactResolution.project.id,
+                    exactProjectDisplayName: buildProjectDisplayName(exactResolution.project),
+                    matchedAs: exactResolution.buildingName ? 'building' : 'project',
+                    buildingName: exactResolution.buildingName || null,
+                    candidates: [],
+                },
+            });
+            statusCounts.exact += 1;
+            continue;
+        }
+
+        const analysis = await analyzeProjectNameResolution(row.projectName, {
+            projects,
+            limit: 5,
+            threshold: 0.75,
+        });
+
+        if (analysis.status === 'fuzzy') {
+            previewRows.push({
+                ...row,
+                resolution: {
+                    status: 'fuzzy',
+                    exactProjectId: null,
+                    candidates: analysis.candidates.map((candidate) => ({
+                        projectId: candidate.project.id,
+                        projectDisplayName: buildProjectDisplayName(candidate.project),
+                        score: candidate.score,
+                        matchedAs: candidate.matchedAs,
+                        buildingName: candidate.buildingName || null,
+                    })),
+                },
+            });
+            statusCounts.fuzzy += 1;
+            continue;
+        }
+
+        previewRows.push({
+            ...row,
+            resolution: {
+                status: 'none',
+                exactProjectId: null,
+                candidates: [],
+            },
+        });
+        statusCounts.none += 1;
+    }
+
+    return NextResponse.json({
+        mode: 'preview',
+        total: imported.rows.length,
+        originalRows: imported.originalRows,
+        expandedItems: imported.rows.filter((row) => !row.error).length,
+        source: imported.source,
+        fileName: imported.fileName || null,
+        sheetName: imported.sheetName || null,
+        statusCounts,
+        rows: previewRows,
+        projectOptions,
+        errors,
+    });
+}
+
+async function commitImportRows(imported, rowAssignments = []) {
+    const saved = [];
+    const errors = [];
+    const pendingAllocations = [];
+    const newProjects = new Map();
+    let pricedCount = 0;
+    let workloadOnlyCount = 0;
+
+    const assignmentMap = new Map(
+        rowAssignments.map((item) => [Number.parseInt(item?.rowIndex, 10), item]),
+    );
+
+    for (const row of imported.rows) {
+        if (row.error) {
+            errors.push(row);
+            continue;
+        }
+
+        try {
+            const assignment = assignmentMap.get(Number(row.rowIndex));
+            const { workLog, calculation, project, projectCreated } = await saveWorklogRow(row, assignment);
+            saved.push(workLog);
+
+            if (projectCreated && project?.id) {
+                newProjects.set(project.id, {
+                    id: project.id,
+                    name: buildProjectDisplayName(project),
+                });
+            }
+
+            if (calculation?.status === 'created') {
+                pricedCount += 1;
+            } else {
+                workloadOnlyCount += 1;
+            }
+
+            const pending = buildPendingAllocationPayload(workLog, calculation);
+            if (pending) {
+                pendingAllocations.push(pending);
+            }
+        } catch (error) {
+            errors.push({ ...row, error: true, message: error.message });
+        }
+    }
+
+    return NextResponse.json({
+        saved: saved.length,
+        total: imported.rows.length,
+        originalRows: imported.originalRows,
+        expandedItems: imported.rows.filter((row) => !row.error).length,
+        source: imported.source,
+        fileName: imported.fileName || null,
+        sheetName: imported.sheetName || null,
+        pricedCount,
+        workloadOnlyCount,
+        newProjects: Array.from(newProjects.values()),
+        pendingAllocations,
+        errors,
+    });
 }
 
 export async function GET(request) {
@@ -153,60 +497,13 @@ export async function GET(request) {
 
 export async function POST(request) {
     try {
-        const imported = await resolveImportRows(request);
-        const saved = [];
-        const errors = [];
-        const pendingAllocations = [];
-        const newProjects = new Map();
-        let pricedCount = 0;
-        let workloadOnlyCount = 0;
+        const { mode, rowAssignments, imported } = await resolveImportRequest(request);
 
-        for (const row of imported.rows) {
-            if (row.error) {
-                errors.push(row);
-                continue;
-            }
-
-            try {
-                const { workLog, calculation, project, projectCreated } = await saveWorklogRow(row);
-                saved.push(workLog);
-
-                if (projectCreated && project?.id) {
-                    newProjects.set(project.id, {
-                        id: project.id,
-                        name: buildProjectDisplayName(project),
-                    });
-                }
-
-                if (calculation?.status === 'created') {
-                    pricedCount += 1;
-                } else {
-                    workloadOnlyCount += 1;
-                }
-
-                const pending = buildPendingAllocationPayload(workLog, calculation);
-                if (pending) {
-                    pendingAllocations.push(pending);
-                }
-            } catch (error) {
-                errors.push({ ...row, error: true, message: error.message });
-            }
+        if (mode === 'preview') {
+            return buildPreviewResponse(imported);
         }
 
-        return NextResponse.json({
-            saved: saved.length,
-            total: imported.rows.length,
-            originalRows: imported.originalRows,
-            expandedItems: imported.rows.filter((row) => !row.error).length,
-            source: imported.source,
-            fileName: imported.fileName || null,
-            sheetName: imported.sheetName || null,
-            pricedCount,
-            workloadOnlyCount,
-            newProjects: Array.from(newProjects.values()),
-            pendingAllocations,
-            errors,
-        });
+        return commitImportRows(imported, rowAssignments);
     } catch (error) {
         return NextResponse.json({ error: error.message }, { status: 400 });
     }
