@@ -6,8 +6,8 @@ node_modules/
 out/
 build/
 
-# database — now tracked for multi-machine sync
-# *.db
+# database (local business data — must NOT be committed)
+*.db
 
 # uploaded contracts (user files, not source code)
 /contracts/

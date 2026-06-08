@@ -52,7 +52,9 @@ tmp-*.out
 /.dev-server.log
 /.dev-server.pid
 
-# database copies / test databases (main db prisma/dev.db stays tracked)
+# database copies / test databases (local data — must NOT be committed)
 /dev.db
+prisma/dev.db
+prisma/*.db
 test_download.db
 prisma/dev.db.bak-*
