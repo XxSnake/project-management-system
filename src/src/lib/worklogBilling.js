@@ -1,4 +1,4 @@
-import { isNonBillableLayoutWork } from '@/lib/worklogClassification';
+import { getNonWorkloadReason, isNonBillableLayoutWork } from '@/lib/worklogClassification';
 
 export function normalizePricingMode(value) {
     if (value === 'area' || value === 'mixed' || value === 'lumpsum') return value;
@@ -51,6 +51,7 @@ export function getWorklogStaff(log) {
  *   exceeded            产值超限（累计超过合同100%）
  *   workload-only       仅记工作量（未签合同且无手动产值）
  *   no-contract-manual  未签合同手工产值
+ *   non-workload        保留记录但不计工作量和产值
  *   non-billable-layout 布点/布设，仅记工作量
  *   unmatched           未匹配单价
  */
@@ -62,6 +63,15 @@ export function getWorklogBillingState(log) {
     const hasShare = normalizeAllocationShare(log?.allocationShare) !== null;
     const calculationMode = log?.productionValues?.[0]?.calculationMode || null;
     const isExceeded = (log?.productionValues || []).some((pv) => pv.exceeded);
+    const nonWorkloadReason = getNonWorkloadReason(log);
+
+    if (nonWorkloadReason) {
+        return {
+            code: 'non-workload',
+            label: `${nonWorkloadReason}·不计工作量`,
+            tone: 'pending',
+        };
+    }
 
     if (isNonBillableLayoutWork(log)) {
         return {

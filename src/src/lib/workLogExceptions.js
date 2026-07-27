@@ -1,5 +1,5 @@
 import { normalizeAllocationShare, normalizePricingMode } from '@/lib/worklogBilling';
-import { isNonBillableLayoutWork } from '@/lib/worklogClassification';
+import { isNonBillableLayoutWork, isNonWorkloadWork } from '@/lib/worklogClassification';
 
 export const EXCEPTION_TYPES = {
     INVALID_QUANTITY: 'invalid-quantity',
@@ -114,10 +114,12 @@ function collectAllExceptions(workLog) {
     const contract = workLog?.project?.contract || null;
     const pricingMode = normalizePricingMode(contract?.pricingMode);
     const nonBillableLayout = isNonBillableLayoutWork(workLog);
+    const nonWorkload = isNonWorkloadWork(workLog);
+    const excludedFromBilling = nonBillableLayout || nonWorkload;
     const manualValued = hasPositiveManualValue(workLog);
     const contractExists = hasContract(workLog);
 
-    if ((quantity === null || quantity <= 0) && !nonBillableLayout) {
+    if ((quantity === null || quantity <= 0) && !excludedFromBilling) {
         exceptions.add(EXCEPTION_TYPES.INVALID_QUANTITY);
     }
 
@@ -130,13 +132,13 @@ function collectAllExceptions(workLog) {
         && (pricingMode === 'unit' || pricingMode === 'mixed')
         && !hasProductionValues(workLog)
         && !manualValued
-        && !nonBillableLayout
+        && !excludedFromBilling
         && allocationShare === null
     ) {
         exceptions.add(EXCEPTION_TYPES.NO_PRICE_MATCH);
     }
 
-    if (contractExists && !manualValued && !nonBillableLayout) {
+    if (contractExists && !manualValued && !excludedFromBilling) {
         if (pricingMode === 'area' && allocationShare === null) {
             exceptions.add(EXCEPTION_TYPES.PENDING_ALLOCATION_SHARE);
         }
@@ -153,6 +155,7 @@ function collectAllExceptions(workLog) {
     if (
         contractExists
         && !manualValued
+        && !excludedFromBilling
         && (
             (pricingMode === 'area' && !hasPositiveNumber(contract?.areaPricingAmount))
             || (pricingMode === 'lumpsum' && !hasPositiveNumber(contract?.lumpSumAmount))
@@ -161,11 +164,11 @@ function collectAllExceptions(workLog) {
         exceptions.add(EXCEPTION_TYPES.CONTRACT_INCOMPLETE);
     }
 
-    if (!contractExists && !workLog?.project?.noContractExpected && !manualValued) {
+    if (!contractExists && !workLog?.project?.noContractExpected && !manualValued && !excludedFromBilling) {
         exceptions.add(EXCEPTION_TYPES.WORKLOAD_ONLY);
     }
 
-    if (hasExceededProduction(workLog)) {
+    if (hasExceededProduction(workLog) && !nonWorkload) {
         exceptions.add(EXCEPTION_TYPES.EXCEEDED);
     }
 

@@ -1,9 +1,9 @@
 import * as XLSX from 'xlsx';
 
-import { hasTaskProvider, requestTaskModel } from '@/lib/modelGateway';
+import { hasTaskProvider, requestTaskModel } from './modelGateway.js';
 
 const SIMPLE_QUANTITY_REGEX = /^(\d+(?:\.\d+)?)\s*([\u4e00-\u9fa5A-Za-z%]+)?$/u;
-const QUANTITY_CANDIDATE_REGEX = /(\d+(?:\.\d+)?)(个构件|构件|点|组|根|栋|项|处|个|柱|梁|米|m²|㎡|m2|m)/gu;
+const QUANTITY_CANDIDATE_REGEX = /(\d+(?:\.\d+)?)(个构件|构件|点|组|根|条|栋|项|处|个|柱|梁|米|m²|㎡|m2|m)/gu;
 const MODEL_BATCH_SIZE = 6;
 const MAX_MODEL_ROWS_PER_IMPORT = 6;
 const COMMON_ITEM_NAMES = [
@@ -143,6 +143,7 @@ function normalizeQuantityUnit(unit) {
     }
 
     if (rawUnit === '构件' || rawUnit === '个构件') return '个构件';
+    if (rawUnit === '构建' || rawUnit === '个构建') return '个构件';
     if (rawUnit === 'm²' || rawUnit === '㎡' || rawUnit === 'm2') return '㎡';
     if (rawUnit === 'm') return '米';
     return rawUnit;
@@ -167,6 +168,7 @@ function getQuantityUnitPriority(unit) {
     case '柱':
     case '梁':
     case '个':
+    case '条':
         return 3;
     case '组':
         return 1;
@@ -405,6 +407,48 @@ function resolveObservationSegment(row, label) {
         };
     }
 
+    if (/实体/u.test(normalizedLabel)) {
+        return {
+            testContent: '实体检测',
+            notes: normalizeObservationNotes(normalizedLabel, /实体/u) || baseContext,
+        };
+    }
+
+    if (/植筋/u.test(normalizedLabel)) {
+        return {
+            testContent: '植筋拉拔',
+            notes: normalizeObservationNotes(normalizedLabel, /植筋/u) || baseContext,
+        };
+    }
+
+    if (/防雷/u.test(normalizedLabel)) {
+        return {
+            testContent: '防雷检测',
+            notes: normalizeObservationNotes(normalizedLabel, /防雷/u) || baseContext,
+        };
+    }
+
+    if (/环境/u.test(normalizedLabel)) {
+        return {
+            testContent: '环境检测',
+            notes: normalizeObservationNotes(normalizedLabel, /环境/u) || baseContext,
+        };
+    }
+
+    if (/水压/u.test(normalizedLabel)) {
+        return {
+            testContent: '水压试验',
+            notes: normalizeObservationNotes(normalizedLabel, /水压/u) || baseContext,
+        };
+    }
+
+    if (/等电位/u.test(normalizedLabel)) {
+        return {
+            testContent: '等电位',
+            notes: normalizeObservationNotes(normalizedLabel, /等电位/u) || baseContext,
+        };
+    }
+
     if (/测|观测/u.test(normalizedLabel)) {
         return {
             testContent: baseText.includes('沉降') ? '沉降观测' : (baseText || '观测'),
@@ -468,20 +512,48 @@ function expandObservationBundleRow(row) {
         return null;
     }
 
-    const normalizedText = quantityText
-        .replace(/[，,；;]/gu, '、')
-        .replace(/\s+/gu, '');
-    const segmentRegex = /([^0-9、]{0,16}?)(\d+(?:\.\d+)?)(点|组|根|项|处|个构件|构件|个)/gu;
-    const segments = [];
-    let match;
+    const rawSegments = quantityText
+        .replace(/[\r\n，,；;]/gu, '、')
+        .replace(/\s+/gu, '、')
+        .split('、')
+        .map((item) => item.trim())
+        .filter(Boolean);
+    const segments = rawSegments
+        .map((segment) => {
+            const compact = segment.replace(/\s+/gu, '');
+            const rebarMatch = compact.match(/^([^0-9]*?)(\d+(?:\.\d+)?圆)[：:]?(\d+(?:\.\d+)?)(根)$/u);
+            if (rebarMatch) {
+                return {
+                    label: cleanCellValue(rebarMatch[1]) || (baseText.includes('植筋') ? '植筋' : ''),
+                    quantity: rebarMatch[3],
+                    unit: rebarMatch[4],
+                    notes: rebarMatch[2],
+                };
+            }
 
-    while ((match = segmentRegex.exec(normalizedText)) !== null) {
-        segments.push({
-            label: cleanCellValue(match[1]),
-            quantity: match[2],
-            unit: normalizeQuantityUnit(match[3]) || match[3],
-        });
-    }
+            const prefixMatch = compact.match(/^([^0-9]+?)[：:]?(\d+(?:\.\d+)?)(点|组|根|项|处|个构件|构件|个)$/u);
+            if (prefixMatch) {
+                return {
+                    label: cleanCellValue(prefixMatch[1]),
+                    quantity: prefixMatch[2],
+                    unit: normalizeQuantityUnit(prefixMatch[3]) || prefixMatch[3],
+                    notes: '',
+                };
+            }
+
+            const suffixMatch = compact.match(/^(\d+(?:\.\d+)?)(点|组|根|项|处|个构件|构件|个)([^0-9]+)$/u);
+            if (suffixMatch) {
+                return {
+                    label: cleanCellValue(suffixMatch[3]),
+                    quantity: suffixMatch[1],
+                    unit: normalizeQuantityUnit(suffixMatch[2]) || suffixMatch[2],
+                    notes: '',
+                };
+            }
+
+            return null;
+        })
+        .filter(Boolean);
 
     if (segments.length === 0) {
         return null;
@@ -500,7 +572,7 @@ function expandObservationBundleRow(row) {
             testContent: resolved.testContent,
             quantity: segment.quantity,
             unit: segment.unit,
-            notes: resolved.notes,
+            notes: mergeRemarks(resolved.notes, segment.notes),
         });
     });
 }
@@ -521,6 +593,15 @@ function normalizeBundleItemName(name, fallbackName) {
     if (rawName.includes('保护层')) return '保护层';
     if (rawName.includes('植筋')) return '植筋拉拔';
     if (rawName.includes('防雷')) return '防雷检测';
+
+    const fallback = cleanCellValue(fallbackName);
+    if (
+        fallback
+        && fallback !== rawName
+        && (/^\d+(?:\.\d+)?圆$/u.test(rawName) || /^[一二三四五六七八九十0-9]+层$/u.test(rawName))
+    ) {
+        return normalizeBundleItemName(fallback, '');
+    }
 
     return rawName;
 }
@@ -573,6 +654,8 @@ function expandMethodBundleRow(row) {
 
     const normalizedText = quantityText
         .replace(/[，,；;]/gu, '、')
+        .replace(/个构建/gu, '个构件')
+        .replace(/构建/gu, '构件')
         .replace(/\s+/gu, '');
     const segments = normalizedText.split('、').filter(Boolean);
 
@@ -583,6 +666,42 @@ function expandMethodBundleRow(row) {
     const expanded = [];
 
     segments.forEach((segment) => {
+        if (/植筋/u.test(row.testContent) && /根/u.test(segment)) {
+            const rebarPattern = /(?:(\d+(?:\.\d+)?)圆[：:]?)?([^0-9]*?)(\d+(?:\.\d+)?)根/gu;
+            const rebarItems = [];
+            let rebarMatch;
+
+            while ((rebarMatch = rebarPattern.exec(segment)) !== null) {
+                const leadingContext = rebarItems.length === 0 && rebarMatch.index > 0
+                    ? segment.slice(0, rebarMatch.index).replace(/[：:]+$/u, '')
+                    : '';
+                const notes = [
+                    leadingContext,
+                    rebarMatch[1] ? `${rebarMatch[1]}圆` : '',
+                    cleanCellValue(rebarMatch[2]),
+                ].filter(Boolean).join(' ');
+
+                rebarItems.push({
+                    quantity: rebarMatch[3],
+                    notes,
+                });
+            }
+
+            if (rebarItems.length > 0) {
+                rebarItems.forEach((item) => {
+                    appendExpandedBundleItems(
+                        expanded,
+                        row,
+                        '植筋拉拔',
+                        item.quantity,
+                        '根',
+                        item.notes,
+                    );
+                });
+                return;
+            }
+        }
+
         const multiplierMatch = segment.match(/^(.+?)[*×xX](\d+(?:\.\d+)?)$/u);
         if (multiplierMatch) {
             appendExpandedBundleItems(expanded, row, multiplierMatch[1], multiplierMatch[2], '处');
@@ -887,5 +1006,19 @@ export async function expandWorklogRows(rows) {
         expandedRows[index] = [row];
     });
 
-    return expandedRows.flatMap((items) => items || []);
+    const detailCounters = new Map();
+
+    return expandedRows
+        .flatMap((items) => items || [])
+        .map((row) => {
+            const rowIndex = Number(row?.rowIndex) || 0;
+            const detailIndex = (detailCounters.get(rowIndex) || 0) + 1;
+            detailCounters.set(rowIndex, detailIndex);
+
+            return {
+                ...row,
+                detailIndex,
+                previewKey: `${rowIndex}-${detailIndex}`,
+            };
+        });
 }

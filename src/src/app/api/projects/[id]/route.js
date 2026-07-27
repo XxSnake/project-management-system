@@ -3,6 +3,7 @@ import {
     computeDetectionDrift,
 } from '@/lib/detectionRecordSync';
 import { normalizeProjectName } from '@/lib/projectDisplayName';
+import { isNonWorkloadWork } from '@/lib/worklogClassification';
 import { NextResponse } from 'next/server';
 
 function sumProductionValues(items = []) {
@@ -23,8 +24,9 @@ function buildBuildingSummaries(workLogs = []) {
             workLogCount: 0,
             totalValue: 0,
         };
-        current.workLogCount += 1;
-        current.totalValue += sumProductionValues(log.productionValues);
+        const countsAsWorkload = !isNonWorkloadWork(log);
+        current.workLogCount += countsAsWorkload ? 1 : 0;
+        current.totalValue += countsAsWorkload ? sumProductionValues(log.productionValues) : 0;
         summaries.set(buildingName, current);
     }
 

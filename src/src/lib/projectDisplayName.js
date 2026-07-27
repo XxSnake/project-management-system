@@ -2,8 +2,6 @@ export function normalizeProjectName(value) {
     return String(value ?? '').trim();
 }
 
-const warnedDisplayConflicts = new Set();
-
 export function splitProjectNameAndPhase(projectName) {
     const normalized = normalizeProjectName(projectName);
     if (!normalized) {
@@ -60,9 +58,7 @@ export function buildProjectDisplayName(projectOrName, phase = null) {
     return normalizedPhase ? `${name}（${normalizedPhase}）` : name;
 }
 
-export function buildWorkLogProjectDisplayName(workLog, options = {}) {
-    const { warnOnConflict = false } = options;
-
+export function buildWorkLogProjectDisplayName(workLog) {
     if (!workLog || typeof workLog !== 'object' || Array.isArray(workLog)) {
         return buildProjectDisplayName(workLog);
     }
@@ -78,17 +74,7 @@ export function buildWorkLogProjectDisplayName(workLog, options = {}) {
     const phase = normalizeProjectName(project?.phase);
     const buildingName = normalizeProjectName(workLog.buildingName);
     if (phase) {
-        if (buildingName && warnOnConflict && typeof console !== 'undefined') {
-            const warnKey = workLog.id ? `worklog-${workLog.id}` : `${name}|${phase}|${buildingName}`;
-            if (!warnedDisplayConflicts.has(warnKey)) {
-                warnedDisplayConflicts.add(warnKey);
-                console.warn(`WorkLog display name conflict: phase="${phase}", buildingName="${buildingName}"`, {
-                    workLogId: workLog.id ?? null,
-                    projectId: project?.id ?? null,
-                });
-            }
-        }
-        return `${name}（${phase}）`;
+        return buildingName ? `${name}（${phase} · ${buildingName}）` : `${name}（${phase}）`;
     }
 
     return project?.buildingMode && buildingName ? `${name}（${buildingName}）` : name;

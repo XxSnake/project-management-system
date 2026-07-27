@@ -18,6 +18,22 @@ function buildResolvedProject(project, buildingName = null) {
     };
 }
 
+function splitPhaseAndBuilding(value) {
+    const normalized = normalizeProjectName(value);
+    const parts = normalized.split(/\s*·\s*/u);
+    if (parts.length < 2) {
+        return {
+            phase: normalized,
+            buildingName: null,
+        };
+    }
+
+    return {
+        phase: normalizeProjectName(parts.shift()),
+        buildingName: normalizeProjectName(parts.join(' · ')),
+    };
+}
+
 export async function findProjectByDisplayName(
     projectName,
     fallbackProjectId = null,
@@ -33,6 +49,7 @@ export async function findProjectByDisplayName(
     }
 
     const parsed = splitProjectNameAndPhase(normalized);
+    const parsedDetail = splitPhaseAndBuilding(parsed.phase);
     if (fallbackProject) {
         if (normalized === buildProjectDisplayName(fallbackProject)) {
             return buildResolvedProject(fallbackProject);
@@ -46,9 +63,32 @@ export async function findProjectByDisplayName(
         ) {
             return buildResolvedProject(fallbackProject, parsed.phase);
         }
+
+        if (
+            fallbackProject.buildingMode
+            && normalizeProjectName(fallbackProject.phase)
+            && parsedDetail.buildingName
+            && parsed.name === normalizeProjectName(fallbackProject.name)
+            && parsedDetail.phase === normalizeProjectName(fallbackProject.phase)
+        ) {
+            return buildResolvedProject(fallbackProject, parsedDetail.buildingName);
+        }
     }
 
     if (parsed.phase) {
+        if (parsedDetail.buildingName) {
+            const phasedBuildingProject = await prismaClient.project.findFirst({
+                where: {
+                    name: parsed.name,
+                    phase: parsedDetail.phase,
+                    buildingMode: true,
+                },
+            });
+            if (phasedBuildingProject) {
+                return buildResolvedProject(phasedBuildingProject, parsedDetail.buildingName);
+            }
+        }
+
         const phasedProject = await prismaClient.project.findFirst({
             where: {
                 name: parsed.name,

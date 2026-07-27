@@ -62,6 +62,12 @@ function getStatusClass(tone) {
     return 'status-badge--pending';
 }
 
+function getCountedProductionValue(log) {
+    return getWorklogBillingState(log).code === 'non-workload'
+        ? 0
+        : sumProductionValues(log);
+}
+
 function buildAllocationItemFromLog(log) {
     const contract = log.project?.contract;
     const pricingMode = normalizePricingMode(contract?.pricingMode);
@@ -1028,7 +1034,7 @@ export default function WorkLogPage() {
         const displayProjectName = buildWorkLogProjectDisplayName(log, { warnOnConflict: true });
         const staffNames = getStaffNames(log).join('、');
         const workDate = new Date(log.workDate).toISOString().slice(0, 10);
-        const totalValue = sumProductionValues(log);
+        const totalValue = getCountedProductionValue(log);
         const billingState = getWorklogBillingState(log);
         const haystack = `${log.id} ${projectName} ${displayProjectName} ${log.testContent} ${staffNames} ${log.remarks || ''} ${log.buildingName || ''} ${totalValue}`.toLowerCase();
 
@@ -1053,8 +1059,15 @@ export default function WorkLogPage() {
 
     const selectedVisibleCount = filteredLogs.filter((log) => selectedIds.includes(log.id)).length;
     const allSelected = filteredLogs.length > 0 && selectedVisibleCount === filteredLogs.length;
-    const filteredTotalValue = filteredLogs.reduce((sum, log) => sum + sumProductionValues(log), 0);
-    const filteredWorkload = filteredLogs.reduce((sum, log) => sum + Number(log.quantity || 0), 0);
+    const filteredTotalValue = filteredLogs.reduce((sum, log) => sum + getCountedProductionValue(log), 0);
+    const filteredWorkload = filteredLogs.reduce(
+        (sum, log) => sum + (
+            getWorklogBillingState(log).code === 'non-workload'
+                ? 0
+                : Number(log.quantity || 0)
+        ),
+        0,
+    );
     const pendingAreaCount = filteredLogs.filter((log) => getWorklogBillingState(log).code === 'pending-area-share').length;
     const exceededCount = filteredLogs.filter((log) => getWorklogBillingState(log).code === 'exceeded').length;
     const noContractCount = filteredLogs.filter((log) => {
@@ -1065,6 +1078,9 @@ export default function WorkLogPage() {
     const previewErrors = importPreview?.errors || [];
     const previewValidCount = previewRows.length;
     const previewStatusCounts = importPreview?.statusCounts || { exact: 0, fuzzy: 0, none: 0 };
+    const previewProjectStatusCounts = importPreview?.projectStatusCounts || { exact: 0, fuzzy: 0, none: 0 };
+    const previewProjectCount = Object.values(previewProjectStatusCounts).reduce((sum, count) => sum + Number(count || 0), 0);
+    const previewNonWorkloadCount = Number(importPreview?.nonWorkloadCount || 0);
     const allocationDialogMeta = getAllocationDialogMeta(activeAllocation);
 
     return (
@@ -1181,15 +1197,19 @@ export default function WorkLogPage() {
                                 <div className="panel-title">导入预览</div>
                                 <div className="panel-note">
                                     当前预览来自{importPreview.source === 'file' ? '文件导入' : '粘贴导入'}。
-                                    可确认 {previewValidCount} 条，精确匹配 {previewStatusCounts.exact || 0} 条，近似候选 {previewStatusCounts.fuzzy || 0} 条，全新项目 {previewStatusCounts.none || 0} 条。
+                                    可确认 {previewValidCount} 条明细，涉及 {previewProjectCount} 个项目；
+                                    精确匹配 {previewStatusCounts.exact || 0} 条，近似候选 {previewStatusCounts.fuzzy || 0} 条，
+                                    需新建 {previewProjectStatusCounts.none || 0} 个项目（{previewStatusCounts.none || 0} 条明细）。
+                                    {previewNonWorkloadCount > 0 ? ` 其中 ${previewNonWorkloadCount} 条保留记录但不计工作量。` : ''}
                                 </div>
                             </div>
                         </div>
 
                         <div className="chip-row">
-                            <span className="badge badge-success">Exact {previewStatusCounts.exact || 0}</span>
-                            <span className="badge badge-warning">Fuzzy {previewStatusCounts.fuzzy || 0}</span>
-                            <span className="badge badge-danger">New {previewStatusCounts.none || 0}</span>
+                            <span className="badge badge-success">精确明细 {previewStatusCounts.exact || 0}</span>
+                            <span className="badge badge-warning">近似明细 {previewStatusCounts.fuzzy || 0}</span>
+                            <span className="badge badge-danger">新项目 {previewProjectStatusCounts.none || 0}</span>
+                            {previewNonWorkloadCount > 0 && <span className="badge badge-info">不计工作量 {previewNonWorkloadCount}</span>}
                             {typeof importPreview.originalRows === 'number' && <span className="badge badge-info">Rows {importPreview.originalRows}</span>}
                             {typeof importPreview.expandedItems === 'number' && <span className="badge badge-info">Expanded {importPreview.expandedItems}</span>}
                             {previewErrors.length > 0 && <span className="badge badge-danger">Errors {previewErrors.length}</span>}
@@ -1210,17 +1230,23 @@ export default function WorkLogPage() {
                                         </tr>
                                     </thead>
                                     <tbody>
-                                        {previewRows.map((row) => {
+                                        {previewRows.map((row, previewIndex) => {
                                             const statusMeta = getPreviewStatusMeta(row.resolution?.status);
                                             const assignment = previewAssignments[row.rowIndex] || buildDefaultPreviewAssignment(row);
                                             const decisionOptions = buildPreviewSelectOptions(row, importPreview.projectOptions || []);
+                                            const previewKey = row.previewKey || `${row.rowIndex}-${previewIndex}`;
 
                                             return (
-                                                <tr key={`preview-${row.rowIndex}`}>
+                                                <tr key={`preview-${previewKey}`}>
                                                     <td>{row.rowIndex}</td>
                                                     <td>{row.workDate || '-'}</td>
                                                     <td>{row.projectName || '-'}</td>
-                                                    <td>{row.testContent || '-'}</td>
+                                                    <td>
+                                                        {row.testContent || '-'}
+                                                        {row.countsAsWorkload === false && (
+                                                            <span className="badge badge-info" style={{ marginLeft: 8 }}>不计工作量</span>
+                                                        )}
+                                                    </td>
                                                     <td>{`${formatNumber(row.quantity)}${row.unit || ''}`}</td>
                                                     <td><span className={statusMeta.className}>{statusMeta.label}</span></td>
                                                     <td>
@@ -1232,7 +1258,7 @@ export default function WorkLogPage() {
                                                                 disabled={Boolean(assignment.locked)}
                                                             >
                                                                 {decisionOptions.map((option) => (
-                                                                    <option key={`${row.rowIndex}-${option.value}`} value={option.value}>
+                                                                    <option key={`${previewKey}-${option.value}`} value={option.value}>
                                                                         {option.label}
                                                                     </option>
                                                                 ))}
@@ -1290,7 +1316,8 @@ export default function WorkLogPage() {
                                 <div className="panel-eyebrow">Import Result</div>
                                 <div className="panel-title">最近一次导入结果</div>
                                 <div className="panel-note">
-                                    已保存 {result.saved || 0} 条，计价成功 {result.pricedCount || 0} 条，仅统计工作量 {result.workloadOnlyCount || 0} 条。
+                                    已保存 {result.saved || 0} 条，计价成功 {result.pricedCount || 0} 条，
+                                    仅统计工作量 {result.workloadOnlyCount || 0} 条，不计工作量 {result.nonWorkloadCount || 0} 条。
                                 </div>
                             </div>
                         </div>
@@ -1299,6 +1326,7 @@ export default function WorkLogPage() {
                             {typeof result.originalRows === 'number' && <span className="badge badge-info">Rows {result.originalRows}</span>}
                             {typeof result.expandedItems === 'number' && <span className="badge badge-info">Expanded {result.expandedItems}</span>}
                             {result.newProjects?.length > 0 && <span className="badge badge-success">New Projects {result.newProjects.length}</span>}
+                            {result.nonWorkloadCount > 0 && <span className="badge badge-info">不计工作量 {result.nonWorkloadCount}</span>}
                             {result.pendingAllocations?.length > 0 && <span className="badge badge-warning">待确认占比 {result.pendingAllocations.length}</span>}
                             {result.errors?.length > 0 && <span className="badge badge-danger">Errors {result.errors.length}</span>}
                         </div>
@@ -1460,7 +1488,7 @@ export default function WorkLogPage() {
                                     </tr>
                                 ) : (
                                     filteredLogs.map((log) => {
-                                        const totalValue = sumProductionValues(log);
+                                        const totalValue = getCountedProductionValue(log);
                                         const isSelected = selectedIds.includes(log.id);
                                         const staffNames = getStaffNames(log);
                                         const status = getWorklogBillingState(log);
@@ -1673,7 +1701,7 @@ export default function WorkLogPage() {
                                     </tr>
                                 ) : (
                                     filteredLogs.map((log) => {
-                                        const totalValue = sumProductionValues(log);
+                                        const totalValue = getCountedProductionValue(log);
                                         const isSelected = selectedIds.includes(log.id);
                                         const staffNames = getStaffNames(log);
                                         const status = getWorklogBillingState(log);

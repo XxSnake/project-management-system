@@ -12,6 +12,7 @@ import {
 } from '@/lib/projectNameMatcher';
 import { calculateProductionValue } from '@/lib/productionCalculator';
 import { syncDetectionRecordFromWorkLog } from '@/lib/detectionRecordSync';
+import { isNonWorkloadWork } from '@/lib/worklogClassification';
 import { normalizeAllocationShare, normalizePricingMode } from '@/lib/worklogBilling';
 import { expandWorklogRows, parseWPSWorkbook, parseWPSText } from '@/lib/wpsParser';
 import { NextResponse } from 'next/server';
@@ -35,6 +36,10 @@ async function findOrCreateStaffIds(staffNames) {
 }
 
 function buildPendingAllocationPayload(workLog, calculation) {
+    if (calculation?.status === 'non-workload' || isNonWorkloadWork(workLog)) {
+        return null;
+    }
+
     const fallbackPayload = (() => {
         const contract = workLog?.project?.contract;
         if (!contract?.id) {
@@ -386,6 +391,39 @@ async function buildPreviewResponse(imported) {
         statusCounts.none += 1;
     }
 
+    const classifiedPreviewRows = previewRows.map((row) => ({
+        ...row,
+        countsAsWorkload: !isNonWorkloadWork(row),
+    }));
+    const projectStatusPriority = {
+        exact: 1,
+        fuzzy: 2,
+        none: 3,
+    };
+    const projectStatuses = new Map();
+
+    classifiedPreviewRows.forEach((row) => {
+        const projectName = normalizeText(row.projectName);
+        if (!projectName) {
+            return;
+        }
+
+        const status = row.resolution?.status || 'none';
+        const previous = projectStatuses.get(projectName);
+        if (!previous || projectStatusPriority[status] > projectStatusPriority[previous]) {
+            projectStatuses.set(projectName, status);
+        }
+    });
+
+    const projectStatusCounts = {
+        exact: 0,
+        fuzzy: 0,
+        none: 0,
+    };
+    projectStatuses.forEach((status) => {
+        projectStatusCounts[status] += 1;
+    });
+
     return NextResponse.json({
         mode: 'preview',
         total: imported.rows.length,
@@ -395,7 +433,9 @@ async function buildPreviewResponse(imported) {
         fileName: imported.fileName || null,
         sheetName: imported.sheetName || null,
         statusCounts,
-        rows: previewRows,
+        projectStatusCounts,
+        nonWorkloadCount: classifiedPreviewRows.filter((row) => !row.countsAsWorkload).length,
+        rows: classifiedPreviewRows,
         projectOptions,
         errors,
     });
@@ -408,6 +448,7 @@ async function commitImportRows(imported, rowAssignments = []) {
     const newProjects = new Map();
     let pricedCount = 0;
     let workloadOnlyCount = 0;
+    let nonWorkloadCount = 0;
 
     const assignmentMap = new Map(
         rowAssignments.map((item) => [Number.parseInt(item?.rowIndex, 10), item]),
@@ -433,6 +474,8 @@ async function commitImportRows(imported, rowAssignments = []) {
 
             if (calculation?.status === 'created') {
                 pricedCount += 1;
+            } else if (calculation?.status === 'non-workload') {
+                nonWorkloadCount += 1;
             } else {
                 workloadOnlyCount += 1;
             }
@@ -456,6 +499,7 @@ async function commitImportRows(imported, rowAssignments = []) {
         sheetName: imported.sheetName || null,
         pricedCount,
         workloadOnlyCount,
+        nonWorkloadCount,
         newProjects: Array.from(newProjects.values()),
         pendingAllocations,
         errors,
@@ -492,7 +536,10 @@ export async function GET(request) {
         },
         orderBy: { workDate: 'desc' },
     });
-    return NextResponse.json(logs);
+    return NextResponse.json(logs.map((log) => ({
+        ...log,
+        countsAsWorkload: !isNonWorkloadWork(log),
+    })));
 }
 
 export async function POST(request) {

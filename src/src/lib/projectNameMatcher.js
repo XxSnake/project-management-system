@@ -23,6 +23,64 @@ function normalizeForSimilarity(value) {
         .replace(/[-()[\]{}【】]/gu, '');
 }
 
+function toChineseBuildingNumber(value) {
+    const number = Number.parseInt(value, 10);
+    const values = {
+        1: '一',
+        2: '二',
+        3: '三',
+        4: '四',
+        5: '五',
+        6: '六',
+        7: '七',
+        8: '八',
+        9: '九',
+        10: '十',
+    };
+    return values[number] || value;
+}
+
+function normalizeKnownProjectAliases(value) {
+    let normalized = normalizeForSimilarity(value)
+        .replace(/弥渡(?:县)?一中/gu, '弥渡县第一完全中学')
+        .replace(/(\d{1,2})#/gu, (match, number) => `${toChineseBuildingNumber(number)}号`);
+
+    if (normalized.includes('弥渡县第一完全中学')) {
+        normalized = normalized
+            .replace(/整体搬迁/gu, '')
+            .replace(/[一二三四五六七八九十0-9]+期/gu, '')
+            .replace(/建设项目|建设工程|项目|工程/gu, '');
+    }
+
+    return normalized;
+}
+
+function extractSpecificityMarkers(value) {
+    const normalized = normalizeForExactMatch(value);
+    return new Set(normalized.match(/[一二三四五六七八九十0-9]+期|[一二三四五六七八九十0-9]+标段/gu) || []);
+}
+
+function adjustScoreForSpecificity(left, right, score) {
+    const inputMarkers = extractSpecificityMarkers(left);
+    if (inputMarkers.size === 0) {
+        return score;
+    }
+
+    const candidateMarkers = extractSpecificityMarkers(right);
+    let matched = 0;
+    let missing = 0;
+
+    inputMarkers.forEach((marker) => {
+        if (candidateMarkers.has(marker)) {
+            matched += 1;
+        } else {
+            missing += 1;
+        }
+    });
+
+    return Math.max(0, Math.min(1, score + matched * 0.06 - missing * 0.06));
+}
+
 function buildMatcherProject(project) {
     return {
         id: project.id,
@@ -177,6 +235,22 @@ export function scoreProjectNameSimilarity(left, right) {
         }
     }
 
+    const aliasLeft = normalizeKnownProjectAliases(left);
+    const aliasRight = normalizeKnownProjectAliases(right);
+    if (aliasLeft && aliasRight) {
+        if (aliasLeft === aliasRight) {
+            bestScore = Math.max(bestScore, 0.96);
+        } else {
+            const aliasScore = (
+                computeJaccardScore(aliasLeft, aliasRight) * 0.4
+                + computeEditSimilarity(aliasLeft, aliasRight) * 0.4
+                + computeLcsSimilarity(aliasLeft, aliasRight) * 0.2
+            );
+            bestScore = Math.max(bestScore, aliasScore * 0.94);
+        }
+    }
+
+    bestScore = adjustScoreForSpecificity(left, right, bestScore);
     return Number(bestScore.toFixed(4));
 }
 
@@ -201,6 +275,34 @@ function extractBuildingNameSuggestion(parsedPhase, projectPhase) {
         .replace(rawProjectPhase, '')
         .replace(/^[-—–:：]+/u, '');
     return normalizeProjectName(simplified) || null;
+}
+
+function extractDelimitedBuildingName(projectName, project) {
+    if (!project?.buildingMode || !normalizeProjectName(project.phase)) {
+        return null;
+    }
+
+    const input = normalizeProjectName(projectName);
+    const baseName = normalizeProjectName(project.name);
+    const projectPhase = normalizeProjectName(project.phase);
+    if (!input || !baseName || !input.startsWith(baseName)) {
+        return null;
+    }
+
+    const remainderAfterName = input
+        .slice(baseName.length)
+        .replace(/^[\s\-—–－:：（(·]+/u, '');
+    if (!remainderAfterName.startsWith(projectPhase)) {
+        return null;
+    }
+
+    return normalizeProjectName(
+        remainderAfterName
+            .slice(projectPhase.length)
+            .replace(/^[\s\-—–－:：·]+/u, '')
+            .replace(/[）)\s]+$/u, '')
+            .replace(/项目$/u, ''),
+    ) || null;
 }
 
 async function loadProjects(options) {
@@ -322,6 +424,14 @@ export async function findFuzzyProjectCandidates(projectName, options = {}) {
                     buildingName,
                 }));
             }
+        }
+
+        const delimitedBuildingName = extractDelimitedBuildingName(projectName, project);
+        if (delimitedBuildingName) {
+            fuzzyCandidates.push(buildCandidate(project, Math.max(score, 0.97), {
+                matchedAs: 'building-in-subproject',
+                buildingName: delimitedBuildingName,
+            }));
         }
     }
 
