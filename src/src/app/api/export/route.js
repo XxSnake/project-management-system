@@ -6,6 +6,7 @@ import {
     fetchTestReports,
 } from '@/lib/reportAggregation';
 import { buildProjectDisplayName } from '@/lib/projectDisplayName';
+import { isNonWorkloadWork } from '@/lib/worklogClassification';
 
 import { NextResponse } from 'next/server';
 import * as XLSX from 'xlsx';
@@ -22,7 +23,8 @@ function buildProjectMatrixRows(logs) {
     logs.forEach((log) => {
         const projectId = log.project?.id || 0;
         const projectName = buildProjectDisplayName(log.project) || '未绑定项目';
-        const totalValue = (log.productionValues || []).reduce((sum, item) => sum + Number(item.value || 0), 0);
+        const productionValues = isNonWorkloadWork(log) ? [] : (log.productionValues || []);
+        const totalValue = productionValues.reduce((sum, item) => sum + Number(item.value || 0), 0);
 
         if (!map.has(projectId)) {
             const row = {
@@ -38,7 +40,7 @@ function buildProjectMatrixRows(logs) {
         const row = map.get(projectId);
         row.项目总产值 += totalValue;
 
-        (log.productionValues || []).forEach((item) => {
+        productionValues.forEach((item) => {
             const name = item.staff?.name;
             if (name && Object.prototype.hasOwnProperty.call(row, name)) {
                 row[name] += Number(item.value || 0);

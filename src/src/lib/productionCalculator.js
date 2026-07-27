@@ -1,7 +1,7 @@
 import { findBestPriceMatch } from '@/lib/worklogMatching';
 import { normalizeAllocationShare, normalizePricingMode } from '@/lib/worklogBilling';
 import { applyProductionCap } from '@/lib/productionCap';
-import { isNonBillableLayoutWork } from '@/lib/worklogClassification';
+import { getNonWorkloadReason, isNonBillableLayoutWork, isNonWorkloadWork } from '@/lib/worklogClassification';
 import prisma from '@/lib/prisma';
 
 async function resolveProjectWithContract(workLog, tx = prisma) {
@@ -119,6 +119,16 @@ async function createProductionValues({
  */
 export async function calculateProductionValue(workLog, staffIds, options = {}) {
     const { tx = prisma } = options;
+
+    const nonWorkloadReason = getNonWorkloadReason(workLog);
+    if (nonWorkloadReason) {
+        return {
+            status: 'non-workload',
+            mode: 'none',
+            reason: nonWorkloadReason,
+            message: `${nonWorkloadReason}记录保留，但不计入工作量和产值`,
+        };
+    }
 
     if (!Array.isArray(staffIds) || staffIds.length === 0) {
         return { status: 'no-staff' };
@@ -403,6 +413,7 @@ function createWorklogRebuildStats(total) {
         created: 0,
         pendingAreaShare: 0,
         workloadOnly: 0,
+        nonWorkload: 0,
         nonBillableLayout: 0,
         noMatch: 0,
         noStaff: 0,
@@ -435,6 +446,9 @@ function applyWorklogRebuildResult(stats, result) {
         break;
     case 'workload-only':
         stats.workloadOnly += 1;
+        break;
+    case 'non-workload':
+        stats.nonWorkload += 1;
         break;
     case 'non-billable-layout':
         stats.workloadOnly += 1;
@@ -677,6 +691,7 @@ export async function retroactiveCalculation(projectId) {
         calculated: 0,
         pendingAreaShare: 0,
         workloadOnly: 0,
+        nonWorkload: 0,
         nonBillableLayout: 0,
         noMatch: 0,
         exceeded: 0,
@@ -685,12 +700,13 @@ export async function retroactiveCalculation(projectId) {
 
     for (const log of unpricedLogs) {
         const staffIds = log.staffMembers.map((sm) => sm.staffId);
-        if (staffIds.length === 0) {
+        const nonWorkload = isNonWorkloadWork(log);
+        if (!nonWorkload && staffIds.length === 0) {
             results.details.push({ workLogId: log.id, status: 'no-staff' });
             continue;
         }
 
-        if (pricingMode === 'area' || pricingMode === 'lumpsum') {
+        if (!nonWorkload && (pricingMode === 'area' || pricingMode === 'lumpsum')) {
             // 面积/包干价合同：需要用户逐条补填占比
             const allocationShare = normalizeAllocationShare(log.allocationShare);
             if (allocationShare === null) {
@@ -735,6 +751,8 @@ export async function retroactiveCalculation(projectId) {
             results.pendingAreaShare += 1;
         } else if (calcResult.status === 'workload-only') {
             results.workloadOnly += 1;
+        } else if (calcResult.status === 'non-workload') {
+            results.nonWorkload += 1;
         } else if (calcResult.status === 'non-billable-layout') {
             results.workloadOnly += 1;
             results.nonBillableLayout += 1;

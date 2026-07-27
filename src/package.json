@@ -6,7 +6,8 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "verify:worklog": "node scripts/verify-worklog-import.mjs"
   },
   "dependencies": {
     "@prisma/client": "^6.19.2",

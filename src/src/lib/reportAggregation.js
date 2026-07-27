@@ -1,6 +1,7 @@
 import prisma from '@/lib/prisma';
 import { buildProjectDisplayName, buildWorkLogProjectDisplayName } from '@/lib/projectDisplayName';
 import { normalizeAllocationShare, normalizePricingMode, sumProductionValues } from '@/lib/worklogBilling';
+import { getNonWorkloadReason } from '@/lib/worklogClassification';
 
 function getMonthRange(month) {
     if (!month) {
@@ -51,19 +52,26 @@ export async function fetchReportLogs(month) {
 }
 
 function getLogMeta(log) {
-    const quantity = Number.parseFloat(log.quantity) || 0;
+    const sourceQuantity = Number.parseFloat(log.quantity) || 0;
+    const nonWorkloadReason = getNonWorkloadReason(log);
+    const countsAsWorkload = !nonWorkloadReason;
+    const quantity = countsAsWorkload ? sourceQuantity : 0;
     const staffMembers = Array.isArray(log.staffMembers) ? log.staffMembers : [];
     const staffCount = staffMembers.length;
-    const totalValue = sumProductionValues(log);
+    const sourceTotalValue = sumProductionValues(log);
+    const totalValue = countsAsWorkload ? sourceTotalValue : 0;
     const contract = log.project?.contract || null;
     const pricingMode = normalizePricingMode(contract?.pricingMode);
     const share = normalizeAllocationShare(log.allocationShare);
 
-    const isExceeded = (log.productionValues || []).some((item) => item.exceeded);
+    const isExceeded = countsAsWorkload && (log.productionValues || []).some((item) => item.exceeded);
 
     return {
+        sourceQuantity,
         quantity,
         totalValue,
+        countsAsWorkload,
+        nonWorkloadReason,
         contract,
         pricingMode,
         share,
@@ -71,7 +79,10 @@ function getLogMeta(log) {
         staffCount,
         workloadPerStaff: staffCount > 0 ? quantity / staffCount : 0,
         hasContract: Boolean(contract?.id),
-        isAreaPending: Boolean(contract?.id) && (pricingMode === 'area' || pricingMode === 'lumpsum') && totalValue <= 0,
+        isAreaPending: countsAsWorkload
+            && Boolean(contract?.id)
+            && (pricingMode === 'area' || pricingMode === 'lumpsum')
+            && totalValue <= 0,
         isExceeded,
     };
 }
@@ -110,9 +121,9 @@ export function aggregateReports(logs, groupBy = 'staff') {
             const entry = map.get(projectId);
             entry.total += meta.totalValue;
             entry.count += meta.totalValue > 0 ? 1 : 0;
-            entry.workloadCount += 1;
+            entry.workloadCount += meta.countsAsWorkload ? 1 : 0;
             entry.workloadQuantity += meta.quantity;
-            entry.noContractCount += meta.hasContract ? 0 : 1;
+            entry.noContractCount += meta.countsAsWorkload && !meta.hasContract ? 1 : 0;
             entry.pendingAreaCount += meta.isAreaPending ? 1 : 0;
             entry.exceededCount += meta.isExceeded ? 1 : 0;
         });
@@ -153,13 +164,13 @@ export function aggregateReports(logs, groupBy = 'staff') {
             }
 
             const entry = map.get(staffId);
-            const production = productionByStaff.get(staffId);
+            const production = meta.countsAsWorkload ? productionByStaff.get(staffId) : null;
 
             entry.total += Number(production?.value || 0);
             entry.count += production ? 1 : 0;
-            entry.workloadCount += 1;
+            entry.workloadCount += meta.countsAsWorkload ? 1 : 0;
             entry.workloadQuantity += meta.workloadPerStaff;
-            entry.noContractCount += meta.hasContract ? 0 : 1;
+            entry.noContractCount += meta.countsAsWorkload && !meta.hasContract ? 1 : 0;
             entry.pendingAreaCount += meta.isAreaPending ? 1 : 0;
             entry.exceededCount += meta.isExceeded ? 1 : 0;
         });
@@ -233,9 +244,9 @@ export function aggregateReportsWithType(logs, testReports, groupBy = 'staff') {
             entry.testingTotal += meta.totalValue;
             entry.total += meta.totalValue;
             entry.count += meta.totalValue > 0 ? 1 : 0;
-            entry.workloadCount += 1;
+            entry.workloadCount += meta.countsAsWorkload ? 1 : 0;
             entry.workloadQuantity += meta.quantity;
-            entry.noContractCount += meta.hasContract ? 0 : 1;
+            entry.noContractCount += meta.countsAsWorkload && !meta.hasContract ? 1 : 0;
             entry.pendingAreaCount += meta.isAreaPending ? 1 : 0;
             entry.exceededCount += meta.isExceeded ? 1 : 0;
         });
@@ -290,15 +301,15 @@ export function aggregateReportsWithType(logs, testReports, groupBy = 'staff') {
 
         meta.staffMembers.forEach((item) => {
             const entry = ensureStaff(item.staffId, item.staff?.name || '未命名人员');
-            const production = productionByStaff.get(item.staffId);
+            const production = meta.countsAsWorkload ? productionByStaff.get(item.staffId) : null;
             const value = Number(production?.value || 0);
 
             entry.testingTotal += value;
             entry.total += value;
             entry.count += production ? 1 : 0;
-            entry.workloadCount += 1;
+            entry.workloadCount += meta.countsAsWorkload ? 1 : 0;
             entry.workloadQuantity += meta.workloadPerStaff;
-            entry.noContractCount += meta.hasContract ? 0 : 1;
+            entry.noContractCount += meta.countsAsWorkload && !meta.hasContract ? 1 : 0;
             entry.pendingAreaCount += meta.isAreaPending ? 1 : 0;
             entry.exceededCount += meta.isExceeded ? 1 : 0;
         });
@@ -376,13 +387,15 @@ export function buildWorklogDetailRows(logs) {
             : [{ staffId: null, staff: { name: '' } }];
 
         staffMembers.forEach((item) => {
-            const production = item.staffId ? productionByStaff.get(item.staffId) : null;
+            const production = meta.countsAsWorkload && item.staffId
+                ? productionByStaff.get(item.staffId)
+                : null;
 
             rows.push({
                 日期: log.workDate.toISOString().split('T')[0],
                 项目: getWorklogDisplayName(log),
                 检测内容: log.testContent,
-                数量: meta.quantity,
+                数量: meta.sourceQuantity,
                 单位: log.unit || '',
                 人员: item.staff?.name || '',
                 工作量分摊: item.staffId ? Number(meta.workloadPerStaff.toFixed(2)) : meta.quantity,
@@ -391,7 +404,9 @@ export function buildWorklogDetailRows(logs) {
                 产值: Number((production?.value || 0).toFixed(2)),
                 原始产值: production?.exceeded ? Number((production?.originalValue || 0).toFixed(2)) : '',
                 价格来源: production?.priceSource || '',
-                状态: meta.isExceeded
+                状态: !meta.countsAsWorkload
+                    ? `${meta.nonWorkloadReason}，不计工作量`
+                    : meta.isExceeded
                     ? '产值超限'
                     : meta.isAreaPending
                         ? '待确认占比'
